@@ -1,13 +1,10 @@
-"""
-麦麦自主规划插件
-
-让麦麦具备自主规划和执行目标的能力
-"""
+"""麦麦自主规划插件 - 让麦麦能够自主管理日程和目标"""
 
 import asyncio
 import json
 from typing import List, Tuple, Type, Dict, Any, Optional
 from datetime import datetime, timedelta
+from collections import OrderedDict
 
 from src.plugin_system import (
     BasePlugin,
@@ -25,17 +22,62 @@ from src.common.logger import get_logger
 
 from .planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
 from .planner.schedule_generator import ScheduleGenerator, ScheduleType
-from .planner.auto_schedule_manager import AutoScheduleManager
-from .actions.schedule_action import ScheduleAction
 from .utils.schedule_image_generator import ScheduleImageGenerator
+from .utils.time_utils import migrate_time_window, parse_time_window
 
 logger = get_logger("autonomous_planning")
 
 
-# ===== Tools =====
+class LRUCache:
+    """LRU缓存实现"""
+
+    def __init__(self, max_size=100):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+
+    def get(self, key):
+        """获取缓存值"""
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return None
+
+    def set(self, key, value):
+        """设置缓存值"""
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        if len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
+
+    def clear(self):
+        """清空缓存"""
+        self.cache.clear()
+
+    def items(self):
+        """返回缓存的所有键值对"""
+        return self.cache.items()
+
+    def __delitem__(self, key):
+        """删除缓存项"""
+        if key in self.cache:
+            del self.cache[key]
+
+    def __contains__(self, key):
+        """检查键是否存在"""
+        return key in self.cache
+
+    def __getitem__(self, key):
+        """获取缓存值（同get但不移动到末尾）"""
+        return self.cache[key]
+
+    def __setitem__(self, key, value):
+        """设置缓存值（支持 cache[key] = value 语法）"""
+        self.set(key, value)
+
 
 class ManageGoalTool(BaseTool):
-    """目标管理工具"""
+    """目标管理工具 - 创建、查看、更新和删除目标"""
 
     name = "manage_goal"
     description = "管理麦麦的长期目标，支持创建、查看、更新、暂停、恢复、完成、取消、删除目标"
@@ -53,18 +95,14 @@ class ManageGoalTool(BaseTool):
     available_for_llm = True
 
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
-        """执行工具"""
+        """执行目标管理操作"""
         try:
             action = function_args.get("action")
             goal_manager = get_goal_manager()
-
-            # 获取当前聊天信息
-            # 优先从 function_args 中的 _chat_id 获取（ToolExecutor 自动注入）
             chat_id = function_args.get("_chat_id", "default")
             user_id = function_args.get("_user_id", "system")
 
             if action == "create":
-                # 创建目标
                 name = function_args.get("name")
                 description = function_args.get("description")
 
@@ -76,7 +114,20 @@ class ManageGoalTool(BaseTool):
                 interval_minutes = function_args.get("interval_minutes")
                 deadline_hours = function_args.get("deadline_hours")
 
-                # 处理 parameters：可能是字符串（JSON）或字典
+                # 参数验证
+                if interval_minutes is not None:
+                    if interval_minutes <= 0:
+                        return {"type": "error", "content": "间隔时间必须大于0分钟"}
+                    if interval_minutes > 525600:  # 1年
+                        return {"type": "error", "content": "间隔时间不能超过1年"}
+
+                if deadline_hours is not None:
+                    if deadline_hours <= 0:
+                        return {"type": "error", "content": "截止时间必须大于0小时"}
+                    if deadline_hours > 87600:  # 10年
+                        return {"type": "error", "content": "截止时间不能超过10年"}
+
+                # 解析parameters参数
                 parameters_raw = function_args.get("parameters", {})
                 if isinstance(parameters_raw, str):
                     try:
@@ -89,7 +140,7 @@ class ManageGoalTool(BaseTool):
                 else:
                     parameters = {}
 
-                # 计算时间（分钟转秒，精确计算）
+                # 计算时间
                 interval_seconds = int(interval_minutes * 60) if interval_minutes else None
                 deadline = datetime.now() + timedelta(hours=deadline_hours) if deadline_hours else None
 
@@ -114,12 +165,10 @@ class ManageGoalTool(BaseTool):
                 return {"type": "goal_created", "id": goal.goal_id, "content": content}
 
             elif action == "list":
-                # 列出目标
                 summary = goal_manager.get_goals_summary(chat_id=chat_id)
                 return {"type": "goal_list", "content": summary}
 
             elif action == "get":
-                # 查看目标详情
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
@@ -131,12 +180,10 @@ class ManageGoalTool(BaseTool):
                 return {"type": "goal_info", "content": goal.get_summary()}
 
             elif action == "update":
-                # 更新目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
 
-                # 构建更新参数
                 update_params = {}
                 if "name" in function_args:
                     update_params["name"] = function_args["name"]
@@ -162,16 +209,17 @@ class ManageGoalTool(BaseTool):
 
                 if success:
                     goal = goal_manager.get_goal(goal_id)
-                    return {"type": "goal_updated", "content": f"✅ 目标已更新\n\n{goal.get_summary()}"}
+                    if goal:
+                        return {"type": "goal_updated", "content": f"✅ 目标已更新\n\n{goal.get_summary()}"}
+                    else:
+                        return {"type": "error", "content": "目标已被删除"}
                 else:
                     return {"type": "error", "content": "更新失败"}
 
             elif action == "pause":
-                # 暂停目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
-
                 success = goal_manager.pause_goal(goal_id)
                 return {
                     "type": "goal_paused" if success else "error",
@@ -179,11 +227,9 @@ class ManageGoalTool(BaseTool):
                 }
 
             elif action == "resume":
-                # 恢复目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
-
                 success = goal_manager.resume_goal(goal_id)
                 return {
                     "type": "goal_resumed" if success else "error",
@@ -191,11 +237,9 @@ class ManageGoalTool(BaseTool):
                 }
 
             elif action == "complete":
-                # 完成目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
-
                 success = goal_manager.complete_goal(goal_id)
                 return {
                     "type": "goal_completed" if success else "error",
@@ -203,11 +247,9 @@ class ManageGoalTool(BaseTool):
                 }
 
             elif action == "cancel":
-                # 取消目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
-
                 success = goal_manager.cancel_goal(goal_id)
                 return {
                     "type": "goal_cancelled" if success else "error",
@@ -215,19 +257,13 @@ class ManageGoalTool(BaseTool):
                 }
 
             elif action == "delete":
-                # 删除目标
                 goal_id = function_args.get("goal_id")
                 if not goal_id:
                     return {"type": "error", "content": "需要提供goal_id"}
-
-                # 获取目标信息用于显示
                 goal = goal_manager.get_goal(goal_id)
                 if not goal:
                     return {"type": "error", "content": f"目标不存在: {goal_id}"}
-
                 goal_name = goal.name
-
-                # 删除目标
                 success = goal_manager.delete_goal(goal_id)
                 return {
                     "type": "goal_deleted" if success else "error",
@@ -243,7 +279,7 @@ class ManageGoalTool(BaseTool):
 
 
 class GetPlanningStatusTool(BaseTool):
-    """获取规划状态工具"""
+    """获取规划状态工具 - 查看活跃目标和执行历史"""
 
     name = "get_planning_status"
     description = "查看麦麦的自主规划系统状态，包括活跃目标、执行历史等"
@@ -253,7 +289,7 @@ class GetPlanningStatusTool(BaseTool):
     available_for_llm = True
 
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
-        """执行工具"""
+        """查询并返回规划系统状态"""
         try:
             goal_manager = get_goal_manager()
 
@@ -294,63 +330,51 @@ class GetPlanningStatusTool(BaseTool):
 
 
 class GenerateScheduleTool(BaseTool):
-    """生成日程工具"""
+    """生成日程工具 - 自动生成每日/每周/每月计划"""
 
     name = "generate_schedule"
-    description = "自动生成并应用全局每日/每周/每月计划（所有聊天共享），使用LLM智能生成个性化计划，并自动保存为可执行目标"
+    description = "自动生成并应用全局每日/每周/每月计划（所有聊天共享），使用LLM根据bot人设智能生成个性化计划，并自动保存为可执行目标"
     parameters = [
         ("schedule_type", ToolParamType.STRING, "日程类型: daily(每日)/weekly(每周)/monthly(每月)", True, None),
-        ("preferences", ToolParamType.STRING, "用户偏好设置（JSON字符串）", False, None),
         ("auto_apply", ToolParamType.BOOLEAN, "是否立即应用日程（默认true）", False, None),
     ]
     available_for_llm = True
 
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
-        """执行工具"""
+        """生成并应用日程"""
         try:
             schedule_type_str = function_args.get("schedule_type", "daily")
-            preferences_raw = function_args.get("preferences", {})
-            auto_apply = function_args.get("auto_apply", True)  # 默认自动应用日程
-
-            # 解析preferences（可能是JSON字符串）
-            if isinstance(preferences_raw, str):
-                try:
-                    preferences = json.loads(preferences_raw) if preferences_raw else {}
-                except json.JSONDecodeError:
-                    logger.warning(f"preferences解析失败，使用空字典: {preferences_raw}")
-                    preferences = {}
-            else:
-                preferences = preferences_raw if preferences_raw else {}
-
-            # 强制使用全局chat_id
-            chat_id = "global"
+            auto_apply = function_args.get("auto_apply", True)
+            chat_id = "global"  # 全局日程
             user_id = function_args.get("_user_id", "system")
 
             goal_manager = get_goal_manager()
-            schedule_generator = ScheduleGenerator(goal_manager)
 
-            # 使用LLM生成日程
+            # 读取配置并传给ScheduleGenerator
+            schedule_config = {
+                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
+                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
+                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+            }
+            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
             schedule_type = ScheduleType(schedule_type_str)
 
             if schedule_type == ScheduleType.DAILY:
                 schedule = await schedule_generator.generate_daily_schedule(
                     user_id=user_id,
                     chat_id=chat_id,
-                    preferences=preferences,
                     use_llm=True
                 )
             elif schedule_type == ScheduleType.WEEKLY:
                 schedule = await schedule_generator.generate_weekly_schedule(
                     user_id=user_id,
                     chat_id=chat_id,
-                    preferences=preferences,
                     use_llm=True
                 )
             elif schedule_type == ScheduleType.MONTHLY:
                 schedule = await schedule_generator.generate_monthly_schedule(
                     user_id=user_id,
                     chat_id=chat_id,
-                    preferences=preferences,
                     use_llm=True
                 )
             else:
@@ -359,7 +383,7 @@ class GenerateScheduleTool(BaseTool):
             # 获取日程摘要
             summary = schedule_generator.get_schedule_summary(schedule)
 
-            # 如果需要自动应用
+            # 自动应用日程
             if auto_apply:
                 created_ids = await schedule_generator.apply_schedule(
                     schedule=schedule,
@@ -376,7 +400,7 @@ class GenerateScheduleTool(BaseTool):
 
 
 class ApplyScheduleTool(BaseTool):
-    """应用日程工具"""
+    """应用日程工具 - 将日程项转换为可执行目标"""
 
     name = "apply_schedule"
     description = "应用之前生成的日程，将日程项转换为全局可执行的目标（所有聊天共享）"
@@ -386,19 +410,24 @@ class ApplyScheduleTool(BaseTool):
     available_for_llm = True
 
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
-        """执行工具"""
+        """应用日程并创建目标"""
         try:
             schedule_data = function_args.get("schedule_data")
-
             if not schedule_data:
                 return {"type": "error", "content": "需要提供schedule_data"}
 
-            # 强制使用全局chat_id
-            chat_id = "global"
+            chat_id = "global"  # 全局日程
             user_id = function_args.get("_user_id", "system")
 
             goal_manager = get_goal_manager()
-            schedule_generator = ScheduleGenerator(goal_manager)
+
+            # 读取配置并传给ScheduleGenerator
+            schedule_config = {
+                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
+                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
+                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+            }
+            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
 
             # 重建Schedule对象
             from .planner.schedule_generator import ScheduleItem, Schedule
@@ -444,10 +473,8 @@ class ApplyScheduleTool(BaseTool):
             return {"type": "error", "content": f"应用日程失败: {str(e)}"}
 
 
-# ===== Event Handlers =====
-
 class AutonomousPlannerEventHandler(BaseEventHandler):
-    """自主规划事件处理器 - 负责定期清理过期目标"""
+    """自主规划事件处理器 - 定期清理过期目标"""
 
     event_type = EventType.ON_START
     handler_name = "autonomous_planner"
@@ -457,28 +484,20 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
         self.goal_manager = get_goal_manager()
-
-        # 检查循环任务
         self.check_task: Optional[asyncio.Task] = None
         self.is_running = False
-
-        # 配置
         self.enabled = self.get_config("plugin.enabled", True)
-        # 每小时清理一次过期目标
-        self.cleanup_interval = self.get_config("autonomous_planning.cleanup_interval", 3600)
-
+        self.cleanup_interval = self.get_config("autonomous_planning.cleanup_interval", 3600)  # 每小时清理一次
         logger.info(f"自主规划维护任务初始化完成 (清理间隔: {self.cleanup_interval}秒)")
 
     async def execute(
         self, message: MaiMessages | None
     ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        """处理启动事件"""
+        """处理启动事件，启动后台清理循环"""
         if not self.enabled:
             return True, True, None, None, None
 
-        # 启动后台清理循环
         if not self.is_running:
             self.is_running = True
             self.check_task = asyncio.create_task(self._cleanup_loop())
@@ -496,66 +515,308 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
             except Exception as e:
                 logger.error(f"清理目标异常: {e}", exc_info=True)
 
-            # 等待下一个清理周期
-            await asyncio.sleep(self.cleanup_interval)
+            # 等待下一个清理周期（使用短间隔检查，支持快速退出）
+            for _ in range(int(self.cleanup_interval)):
+                if not self.is_running:
+                    break
+                await asyncio.sleep(1)
+
+        logger.info("🛑 目标清理循环已停止")
+
+    async def shutdown(self):
+        """
+        优雅停止清理循环
+
+        调用此方法停止后台清理任务
+        """
+        if self.is_running:
+            logger.info("正在停止目标清理循环...")
+            self.is_running = False
+
+            # 等待任务结束（最多3秒）
+            if self.check_task:
+                try:
+                    await asyncio.wait_for(self.check_task, timeout=3.0)
+                except asyncio.TimeoutError:
+                    logger.warning("清理任务停止超时，强制取消")
+                    self.check_task.cancel()
+                except Exception as e:
+                    logger.error(f"停止清理任务异常: {e}")
+
+            logger.info("✅ 目标清理循环已停止")
 
     async def _cleanup_old_goals(self):
-        """清理旧目标"""
+        """清理已完成/已取消的旧目标（保留30天）"""
         try:
-            # 清理已完成/已取消的旧目标（保留30天）
             cleanup_days = self.get_config("autonomous_planning.cleanup_old_goals_days", 30)
             cleaned_count = self.goal_manager.cleanup_old_goals(days=cleanup_days)
-
             if cleaned_count > 0:
                 logger.info(f"🧹 清理了 {cleaned_count} 个旧目标（{cleanup_days}天前）")
-
         except Exception as e:
             logger.error(f"清理旧目标失败: {e}", exc_info=True)
 
 
 class ScheduleInjectEventHandler(BaseEventHandler):
-    """日程注入事件处理器 - 在LLM调用前注入当前日程"""
+    """日程注入事件处理器 - 在LLM调用前注入当前日程信息到prompt"""
 
-    event_type = EventType.POST_LLM  # POST_LLM实际上在LLM调用之前触发
+    event_type = EventType.POST_LLM  # POST_LLM = 在规划器后、LLM调用前执行
     handler_name = "schedule_inject_handler"
     handler_description = "在LLM调用前注入当前日程信息到prompt"
     weight = 10
-    intercept_message = True  # 必须为True才能返回modified_message
+    intercept_message = True
+
+    # 🆕 时间相关关键词（用于智能判断是否需要注入日程）
+    TIME_KEYWORDS = {
+        "现在", "当前", "正在", "在做", "在干",
+        "今天", "今日", "今早", "今晚",
+        "明天", "昨天", "后天", "前天",
+        "几点", "什么时候", "多久", "时间",
+        "安排", "计划", "日程", "行程",
+        "接下来", "等下", "稍后", "之后",
+        "早上", "中午", "下午", "晚上", "夜里",
+        "忙", "空闲", "有空", "在忙",
+        "做什么", "干什么", "要做",
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        # 加载配置
         self.enabled = self.get_config("plugin.enabled", True)
         self.inject_schedule = self.get_config("autonomous_planning.schedule.inject_schedule", True)
-
-        # 日程缓存（减少重复查询）
-        # 修改：使用dict存储不同chat_id和时间的缓存
-        self._schedule_cache = {}  # key: f"{chat_id}_{time_window}", value: (result, timestamp)
-        self._schedule_cache_ttl = 30  # 缓存30秒
-        self._cache_cleanup_interval = 300  # 每5分钟清理一次过期缓存
+        self.auto_generate_schedule = self.get_config("autonomous_planning.schedule.auto_generate", True)
+        # 使用LRU缓存，最多保存100个缓存项
+        self._schedule_cache = LRUCache(max_size=100)
+        # 缓存配置
+        self._schedule_cache_ttl = 300  # 5分钟TTL
+        self._cache_cleanup_interval = 600  # 10分钟清理一次
         self._last_cache_cleanup = 0  # 上次清理时间
+        # 日程生成状态跟踪（防止重复生成）
+        self._generating_schedule = False
+        self._last_schedule_check_date = None
 
         if self.enabled and self.inject_schedule:
-            logger.info("日程注入功能已启用")
+            logger.info("日程注入功能已启用（使用LRU缓存，最大100项）")
+            if self.auto_generate_schedule:
+                logger.info("日程自动生成功能已启用")
+            asyncio.create_task(self._preheat_cache())  # 启动缓存预热
+
+    async def _preheat_cache(self):
+        """预热缓存 - 启动时提前加载全局日程"""
+        try:
+            await asyncio.sleep(5)  # 等待系统初始化
+            logger.info("🔥 开始预热日程缓存...")
+            self._get_current_schedule("global")
+            logger.info("✅ 日程缓存预热完成")
+        except Exception as e:
+            logger.warning(f"缓存预热失败: {e}")
+
+    def _check_today_schedule_exists(self, chat_id: str = "global") -> bool:
+        """
+        检查今天是否已经有日程
+
+        Args:
+            chat_id: 聊天ID，默认为"global"
+
+        Returns:
+            True表示今天已有日程，False表示没有
+        """
+        try:
+            goal_manager = get_goal_manager()
+            goals = goal_manager.get_active_goals(chat_id=chat_id)
+
+            if not goals:
+                return False
+
+            # 获取今天的日期字符串
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            # 检查是否有今天创建的带time_window的目标
+            for goal in goals:
+                # 检查是否有time_window（日程类型的标志）
+                has_time_window = False
+                if goal.parameters and "time_window" in goal.parameters:
+                    has_time_window = True
+                elif goal.conditions and "time_window" in goal.conditions:
+                    has_time_window = True
+
+                if has_time_window:
+                    # 检查创建时间是否是今天
+                    goal_date = None
+                    if goal.created_at:
+                        try:
+                            if isinstance(goal.created_at, str):
+                                goal_date = goal.created_at.split("T")[0]
+                            else:
+                                goal_date = goal.created_at.strftime("%Y-%m-%d")
+                        except Exception as e:
+                            logger.debug(f"解析目标创建时间失败: {goal.created_at} - {e}")
+
+                    if goal_date == today_str:
+                        logger.debug(f"找到今天的日程目标: {goal.name}")
+                        return True
+
+            logger.debug("今天还没有日程")
+            return False
+
+        except Exception as e:
+            logger.warning(f"检查今天日程失败: {e}")
+            return False
+
+    async def _auto_generate_today_schedule(self, user_id: str, chat_id: str = "global") -> bool:
+        """
+        自动生成今天的日程
+
+        Args:
+            user_id: 用户ID
+            chat_id: 聊天ID，默认为"global"
+
+        Returns:
+            True表示生成成功，False表示失败
+        """
+        try:
+            # 防止并发生成
+            if self._generating_schedule:
+                logger.info("日程正在生成中，跳过重复生成")
+                return False
+
+            self._generating_schedule = True
+            logger.info("🔄 开始自动生成今天的日程...")
+
+            goal_manager = get_goal_manager()
+
+            # 读取配置并传给ScheduleGenerator
+            schedule_config = {
+                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
+                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
+                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+            }
+            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
+
+            # 生成每日日程
+            schedule = await schedule_generator.generate_daily_schedule(
+                user_id=user_id,
+                chat_id=chat_id,
+                use_llm=True
+            )
+
+            # 应用日程
+            created_ids = await schedule_generator.apply_schedule(
+                schedule=schedule,
+                user_id=user_id,
+                chat_id=chat_id
+            )
+
+            if created_ids:
+                logger.info(f"✅ 自动生成日程成功，创建了 {len(created_ids)} 个目标")
+                # 清理缓存，强制重新加载
+                self._schedule_cache.clear()
+                self._last_schedule_check_date = datetime.now().strftime("%Y-%m-%d")
+                return True
+            else:
+                logger.warning("⚠️ 日程生成失败，没有创建任何目标")
+                return False
+
+        except Exception as e:
+            logger.error(f"自动生成日程失败: {e}", exc_info=True)
+            return False
+        finally:
+            self._generating_schedule = False
+
+    def _should_inject_schedule(self, message: MaiMessages) -> bool:
+        """
+        智能判断是否需要注入日程信息
+
+        判断规则：
+        1. 用户消息包含时间相关关键词 → 需要注入
+        2. 短消息（<5字）且包含问号 → 可能是询问，需要注入
+        3. 其他情况 → 不注入
+
+        Args:
+            message: 消息对象
+
+        Returns:
+            是否需要注入日程
+        """
+        try:
+            # 获取用户消息文本
+            user_message = ""
+
+            # 方式1: 从plain_text提取（MaiMessages标准属性）
+            if hasattr(message, 'plain_text') and message.plain_text:
+                user_message = str(message.plain_text)
+                logger.debug(f"从plain_text提取到用户消息: '{user_message}'")
+
+            # 方式2: 从raw_message提取（备选）
+            if not user_message and hasattr(message, 'raw_message') and message.raw_message:
+                user_message = str(message.raw_message)
+                logger.debug(f"从raw_message提取到用户消息: '{user_message}'")
+
+            if not user_message:
+                logger.debug(f"未能提取到用户消息，跳过日程注入")
+                return False
+
+            # 规则1：检查是否包含时间相关关键词
+            for keyword in self.TIME_KEYWORDS:
+                if keyword in user_message:
+                    logger.info(f"检测到时间关键词: {keyword}，将注入日程")
+                    return True
+
+            # 规则2：短消息 + 问号（可能是询问）
+            if len(user_message) < 5 and "?" in user_message:
+                logger.info("检测到短消息问句，将注入日程")
+                return True
+
+            # 其他情况不注入
+            logger.debug("用户消息不涉及时间，跳过日程注入")
+            return False
+
+        except Exception as e:
+            logger.warning(f"判断是否注入日程失败: {e}")
+            # 失败时保守策略：不注入
+            return False
 
     async def execute(
         self, message: MaiMessages | None
     ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        """执行事件处理"""
-        if not self.enabled or not self.inject_schedule:
-            return True, True, None, None, None
-
-        # POST_LLM 事件时 message 不会是 None
-        if not message or not message.llm_prompt:
+        """执行日程注入（智能判断是否需要）"""
+        if not self.enabled or not self.inject_schedule or not message or not message.llm_prompt:
             return True, True, None, None, None
 
         try:
-            # 获取chat_id
             chat_id = message.stream_id if hasattr(message, 'stream_id') else None
-
             if not chat_id:
                 return True, True, None, None, None
+
+            # 🆕 智能判断：只在用户消息涉及时间时才注入日程
+            if not self._should_inject_schedule(message):
+                return True, True, None, None, None
+
+            # 🆕 检查今天是否有日程，没有则自动生成
+            if self.auto_generate_schedule:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+
+                # 只在今天还没检查过的情况下检查
+                if self._last_schedule_check_date != today_str:
+                    has_schedule = self._check_today_schedule_exists(chat_id="global")
+
+                    if not has_schedule:
+                        logger.info("📅 今天还没有日程，准备自动生成...")
+
+                        # 获取用户ID
+                        user_id = "system"
+                        if hasattr(message, 'message_base_info') and message.message_base_info:
+                            user_id = message.message_base_info.get('user_id', 'system')
+
+                        # 异步生成日程（不阻塞当前回复）
+                        # 注意：这里使用 asyncio.create_task 异步执行，不影响当前响应速度
+                        generation_success = await self._auto_generate_today_schedule(user_id, chat_id="global")
+
+                        if generation_success:
+                            logger.info("✅ 日程自动生成完成，继续注入")
+                        else:
+                            logger.warning("⚠️ 日程自动生成失败")
+                    else:
+                        logger.debug("今天已有日程，跳过自动生成")
+                        self._last_schedule_check_date = today_str
 
             # 获取当前日程
             current_activity, current_description, next_activity, next_time = self._get_current_schedule(chat_id)
@@ -563,27 +824,20 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             # 构建日程提示
             schedule_prompt = ""
             if current_activity:
-                # 使用自然、符合麦麦风格的提示语气
-                schedule_prompt = f"\n【当前状态】\n"
-                schedule_prompt += f"这会儿正{current_activity}"
-
+                schedule_prompt = f"\n【当前状态】\n这会儿正{current_activity}"
                 if current_description:
                     schedule_prompt += f"（{current_description}）"
-
                 schedule_prompt += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
-
                 if next_activity and next_time:
                     schedule_prompt += f"\n等下{next_time}要{next_activity}。"
-
                 schedule_prompt += "\n"
 
-            # 如果有日程信息，注入到prompt
+            # 注入日程信息到prompt
             if schedule_prompt:
                 original_prompt = str(message.llm_prompt)
-                # 在prompt开头注入日程信息
                 new_prompt = schedule_prompt + "\n" + original_prompt
                 message.modify_llm_prompt(new_prompt, suppress_warning=True)
-                logger.debug(f"已注入日程状态: {current_activity}")
+                logger.info(f"✅ 已注入日程状态: {current_activity}")
 
             return True, True, None, None, message
 
@@ -606,7 +860,12 @@ class ScheduleInjectEventHandler(BaseEventHandler):
 
     def _get_current_schedule(self, chat_id: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
         """
-        获取当前日程信息（带缓存）
+        获取当前日程信息（带优化缓存）
+
+        优化：
+        1. 缓存TTL从30秒提升到5分钟
+        2. 缓存键改为按小时（而非5分钟窗口），提高命中率
+        3. 定期清理过期缓存，避免内存泄漏
 
         Returns:
             (当前活动, 活动描述, 下一个活动, 下一个活动时间)
@@ -619,10 +878,9 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         current_minute = now.minute
         current_time = time.time()
 
-        # 构建缓存键：包含chat_id和时间窗口（5分钟精度）
-        # 使用5分钟窗口而不是小时，减少跨窗口缓存失效问题
-        time_window = (current_hour * 60 + current_minute) // 5  # 每5分钟一个窗口
-        cache_key = f"{chat_id or 'global'}_{time_window}"
+        # 🆕 优化：按小时缓存（而非5分钟窗口）
+        # 原因：日程是按小时安排的，同一小时内不会变化
+        cache_key = f"{chat_id or 'global'}_{now.strftime('%Y%m%d%H')}"
 
         # 定期清理过期缓存（避免内存无限增长）
         if current_time - self._last_cache_cleanup > self._cache_cleanup_interval:
@@ -633,6 +891,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         if cache_key in self._schedule_cache:
             cached_result, cached_time = self._schedule_cache[cache_key]
             if current_time - cached_time < self._schedule_cache_ttl:
+                # 缓存命中
                 return cached_result
 
         # 缓存过期或不存在，重新查询
@@ -651,7 +910,6 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 self._schedule_cache[cache_key] = (result, current_time)
                 return result
 
-            current_minute = now.minute
             current_time_minutes = current_hour * 60 + current_minute
 
             # 找到有时间窗口的目标
@@ -675,13 +933,13 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             # 排序：按开始时间（兼容新旧格式）
             def get_start_minutes(item):
                 goal, time_window = item
-                start_val = time_window[0] if time_window else 0
-                # 判断格式
-                if len(time_window) > 1 and time_window[1] > 24:
-                    # 新格式：已经是分钟
+                if not time_window or len(time_window) < 2:
+                    return 0
+                start_val = time_window[0]
+                # 判断格式：end_val > 24 说明是分钟格式
+                if time_window[1] > 24:
                     return start_val
                 else:
-                    # 旧格式：小时，转为分钟
                     return start_val * 60
 
             scheduled_goals.sort(key=get_start_minutes)
@@ -690,18 +948,9 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             current_activity = None
             current_description = None
             for goal, time_window in scheduled_goals:
-                start_val = time_window[0] if len(time_window) > 0 else 0
-                end_val = time_window[1] if len(time_window) > 1 else start_val + 60
-
-                # 判断格式并转换
-                if end_val <= 24:
-                    # 旧格式
-                    start_minutes = start_val * 60
-                    end_minutes = end_val * 60
-                else:
-                    # 新格式
-                    start_minutes = start_val
-                    end_minutes = end_val
+                start_minutes, end_minutes = parse_time_window(time_window)
+                if start_minutes is None:
+                    continue
 
                 if start_minutes <= current_time_minutes < end_minutes:
                     current_activity = goal.name
@@ -830,27 +1079,20 @@ class PlanningCommand(BaseCommand):
         Returns:
             (start_minutes, end_minutes) 元组
         """
+        # 优先从parameters读取time_window，其次从conditions读取
         time_window = None
         if goal.parameters and "time_window" in goal.parameters:
-            time_window = goal.parameters.get("time_window", [0, 0])
+            time_window = goal.parameters.get("time_window")
         elif goal.conditions and "time_window" in goal.conditions:
-            time_window = goal.conditions.get("time_window", [0, 0])
+            time_window = goal.conditions.get("time_window")
 
         if not time_window:
             return (0, 60)
 
-        start_val = time_window[0] if len(time_window) > 0 else 0
-        end_val = time_window[1] if len(time_window) > 1 else start_val + 60
-
-        # 判断格式并转换为分钟
-        if end_val <= 24:
-            # 旧格式：小时
-            start_minutes = start_val * 60
-            end_minutes = end_val * 60
-        else:
-            # 新格式：分钟
-            start_minutes = start_val
-            end_minutes = end_val
+        # 🆕 使用统一的工具函数解析时间窗口
+        start_minutes, end_minutes = parse_time_window(time_window)
+        if start_minutes is None:
+            return (0, 60)
 
         return (start_minutes, end_minutes)
 
@@ -866,7 +1108,7 @@ class PlanningCommand(BaseCommand):
         subcommand = parts[1] if len(parts) > 1 else ""
 
         if subcommand == "status":
-            # 显示状态 - 简洁的时间线格式
+            # 显示状态 - 详细文字格式
             goal_manager = get_goal_manager()
             schedule_goals = self._get_today_schedule_goals(goal_manager)
 
@@ -876,9 +1118,15 @@ class PlanningCommand(BaseCommand):
                 # 按时间排序
                 schedule_goals = self._sort_schedule_goals(schedule_goals)
 
-                messages = ["📅 今日日程\n"]
+                # 获取今天的日期和星期
+                today = datetime.now().strftime("%Y-%m-%d")
+                weekday_cn = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
+                weekday = weekday_cn[datetime.now().weekday()]
 
-                for goal in schedule_goals:
+                messages = [f"📅 今日日程 {today} {weekday}\n"]
+                messages.append(f"共 {len(schedule_goals)} 项活动\n")
+
+                for idx, goal in enumerate(schedule_goals, 1):
                     # 获取时间窗口
                     start_minutes, end_minutes = self._get_time_window_from_goal(goal)
 
@@ -894,10 +1142,19 @@ class PlanningCommand(BaseCommand):
                         "daily_routine": "🏠",
                         "social_maintenance": "💬",
                         "learn_topic": "📖",
+                        "exercise": "🏃",
+                        "rest": "💤",
+                        "free_time": "🌟",
                     }.get(goal.goal_type, "📌")
 
-                    # 简洁格式：时间 + emoji + 名称
-                    messages.append(f"{start_time}-{end_time} {type_emoji} {goal.name}")
+                    # 详细格式：序号、时间、emoji、名称
+                    messages.append(f"{idx}. ⏰ {start_time}-{end_time}  {type_emoji} {goal.name}")
+
+                    # 添加描述
+                    if goal.description:
+                        messages.append(f"   📝 {goal.description}")
+
+                    messages.append("")  # 空行分隔
 
                 await self.send_text("\n".join(messages))
 
@@ -929,22 +1186,36 @@ class PlanningCommand(BaseCommand):
                     })
 
                 # 生成图片
+                img_path = None
+                img_base64 = None
                 try:
-                    today = datetime.now().strftime("%Y-%m-%d %A")
-                    img_bytes, img_base64 = ScheduleImageGenerator.generate_schedule_image(
-                        title=f"📅 今日日程 {today}",
+                    # 简化标题：只显示日期，不显示emoji
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    weekday_cn = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
+                    weekday = weekday_cn[datetime.now().weekday()]
+                    title = f"今日日程 {today} {weekday}"
+
+                    img_path, img_base64 = ScheduleImageGenerator.generate_schedule_image(
+                        title=title,
                         schedule_items=schedule_items
                     )
-                    await self.send_image(img_base64)
+
+                    # 使用imageurl发送文件路径（适合本地文件）
+                    await self.send_custom("imageurl", f"file://{img_path}")
+                    logger.info(f"✅ 日程图片已发送（imageurl，路径: {img_path}）")
+
                 except Exception as e:
-                    logger.error(f"生成日程图片失败: {e}", exc_info=True)
-                    # 降级到文本输出
-                    messages = ["📅 今日日程详情\n"]
-                    for item in schedule_items:
-                        messages.append(f"  ⏰ {item['time']}  {item['name']}")
-                        messages.append(f"     {item['description']}")
-                        messages.append("")
-                    await self.send_text("\n".join(messages))
+                    logger.error(f"发送图片失败: {e}, 使用文本输出")
+                    # 降级方案：文本输出
+                    try:
+                        messages = ["📅 今日日程详情\n"]
+                        for item in schedule_items:
+                            messages.append(f"  ⏰ {item['time']}  {item['name']}")
+                            messages.append(f"     {item['description']}")
+                            messages.append("")
+                        await self.send_text("\n".join(messages))
+                    except Exception as e2:
+                        logger.error(f"文本输出也失败: {e2}")
 
         elif subcommand == "delete":
             # 删除目标
@@ -1056,8 +1327,8 @@ class PlanningCommand(BaseCommand):
         help_text = """🤖 麦麦自主规划系统
 
 📋 命令列表:
-/plan status - 查看今日日程概览（简洁时间线）
-/plan list - 查看今日日程详情（图片格式）
+/plan status - 查看今日日程（详细文字格式，含描述）
+/plan list - 查看今日日程（美观图片格式）
 /plan delete <goal_id或序号> - 删除指定目标
 /plan clear - 清理昨天及更早的旧日程
 /plan help - 显示此帮助
@@ -1065,7 +1336,7 @@ class PlanningCommand(BaseCommand):
 💡 使用方式:
 1. 对我说 "帮我生成今天的日程" 我会自动创建
 2. 对我说 "今天有什么安排" 我会查看并告诉你
-3. 使用 status 查看简洁格式，list 查看详细信息
+3. 使用 status 查看详细文字信息，list 查看美观图片
 4. 使用 clear 清理旧日程，保持目标列表整洁
 
 ✨ 示例对话:
@@ -1109,33 +1380,53 @@ class AutonomousPlanningPlugin(BasePlugin):
             "enabled": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用自主规划插件"
+                description="是否启用插件"
             ),
         },
         "autonomous_planning": {
-            "interval": ConfigField(
+            "cleanup_interval": ConfigField(
                 type=int,
-                default=300,
-                description="规划循环间隔（秒），默认5分钟"
+                default=3600,
+                description="清理间隔（秒）"
             ),
-            "max_actions_per_cycle": ConfigField(
+            "cleanup_old_goals_days": ConfigField(
                 type=int,
-                default=3,
-                description="每个周期最多执行的行动数量"
+                default=30,
+                description="保留历史记录天数"
             ),
-            "enable_llm_planning": ConfigField(
-                type=bool,
-                default=False,
-                description="是否启用LLM智能规划（实验性）"
-            ),
+            "schedule": {
+                "inject_schedule": ConfigField(
+                    type=bool,
+                    default=True,
+                    description="在对话时自然提到当前活动"
+                ),
+                "auto_generate": ConfigField(
+                    type=bool,
+                    default=True,
+                    description="询问日程时自动检查并生成"
+                ),
+                "use_multi_round": ConfigField(
+                    type=bool,
+                    default=True,
+                    description="启用多轮生成机制"
+                ),
+                "max_rounds": ConfigField(
+                    type=int,
+                    default=2,
+                    description="最多尝试轮数"
+                ),
+                "quality_threshold": ConfigField(
+                    type=float,
+                    default=0.85,
+                    description="质量阈值"
+                ),
+            },
         },
     }
 
     def get_plugin_components(self) -> List[Tuple]:
         """获取插件组件"""
         return [
-            # Actions - 通过 Planner 主动执行的动作
-            (ScheduleAction.get_action_info(), ScheduleAction),
             # Tools - 供 LLM 直接调用的工具
             (ManageGoalTool.get_tool_info(), ManageGoalTool),
             (GetPlanningStatusTool.get_tool_info(), GetPlanningStatusTool),

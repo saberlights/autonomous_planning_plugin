@@ -1,66 +1,86 @@
 """
-日程图片生成器 - 将日程信息转换为美观的图片
+日程图片生成器 - 将日程信息转换为美观的图片（冬季主题）
 """
 
 import os
 import io
 import base64
+import random
+import math
 from typing import Tuple, List, Dict, Any
 from datetime import datetime
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
+
+from src.common.logger import get_logger
+
+logger = get_logger("autonomous_planning.schedule_image_generator")
 
 
 class ScheduleImageGenerator:
     """生成日程图片"""
 
-    # 颜色配置 - 清新的渐变配色
-    BG_START_COLOR = (25, 35, 50)  # 深蓝紫色
-    BG_END_COLOR = (30, 25, 45)  # 深紫色
+    # 🆕 插件根目录（使用相对路径）
+    PLUGIN_ROOT = Path(__file__).parent.parent
 
-    CARD_BG_COLOR = (45, 55, 75, 150)  # 半透明蓝紫色卡片背景
-    CARD_BORDER_COLOR = (120, 150, 200, 120)  # 蓝色边框（半透明）
+    # 🆕 图片资源路径（相对于插件根目录）
+    BIRD_IMAGE_PATH = PLUGIN_ROOT / "assets" / "bird.jpg"
+    WINTER_CHAR_IMAGE_PATH = PLUGIN_ROOT / "assets" / "winter_char.jpg"
 
-    TITLE_COLOR = (200, 220, 255)  # 淡蓝色标题
-    SUBTITLE_COLOR = (180, 200, 255)  # 浅蓝色副标题
-    TEXT_COLOR = (240, 245, 255)  # 淡白色文本
-    TIME_COLOR = (150, 200, 255)  # 亮蓝色时间
-    ACCENT_COLOR = (100, 180, 255)  # 蓝色强调
-
-    # 装饰色
-    GLOW_COLOR = (150, 200, 255, 100)  # 蓝色光晕
-    SHADOW_COLOR = (10, 15, 25, 120)  # 暗色阴影
-
-    # 目标类型emoji和颜色
-    TYPE_EMOJIS = {
-        "meal": ("🍽️", (255, 200, 150)),
-        "study": ("📚", (150, 200, 255)),
-        "entertainment": ("🎮", (255, 150, 200)),
-        "daily_routine": ("🏠", (200, 200, 200)),
-        "social_maintenance": ("💬", (255, 220, 150)),
-        "learn_topic": ("📖", (200, 180, 255)),
-        "health_check": ("🔧", (150, 255, 200)),
-        "exercise": ("🏃", (255, 180, 150)),
-        "rest": ("😴", (200, 200, 255)),
-        "free_time": ("🎨", (200, 255, 200)),
-        "custom": ("📌", (220, 220, 220)),
+    # 目标类型图标（不使用emoji）
+    TYPE_ICONS = {
+        "meal": "●",
+        "study": "■",
+        "entertainment": "◆",
+        "daily_routine": "▲",
+        "social_maintenance": "◇",
+        "learn_topic": "★",
+        "health_check": "◎",
+        "exercise": "▶",
+        "rest": "◐",
+        "free_time": "♦",
+        "custom": "◈",
     }
 
-    # 字体大小
-    TITLE_SIZE = 48
-    SUBTITLE_SIZE = 28
-    TEXT_SIZE = 24
-    TIME_SIZE = 22
+    # ===== 性能优化：缓存机制 =====
+    _cached_bird_image = None
+    _cached_winter_char = None
+    _cached_winter_char_alpha = None  # 预处理后的透明角色
+    _cached_fonts = {}  # 字体缓存 {size: font}
 
-    # 间距
-    PADDING = 50
-    CARD_PADDING = 18
-    LINE_SPACING = 6
-    ITEM_SPACING = 15
-    CARD_RADIUS = 12
+    @classmethod
+    def _load_images(cls):
+        """加载并缓存图片资源"""
+        if cls._cached_bird_image is None:
+            try:
+                cls._cached_bird_image = Image.open(cls.BIRD_IMAGE_PATH).convert('RGBA')
+            except (FileNotFoundError, IOError) as e:
+                logger.warning(f"加载鸟图片失败: {e}")
+                cls._cached_bird_image = Image.new('RGBA', (100, 100), (255, 150, 80, 255))
 
-    @staticmethod
-    def _get_font(size: int) -> ImageFont.FreeTypeFont:
-        """获取字体"""
+        if cls._cached_winter_char is None:
+            try:
+                winter_char = Image.open(cls.WINTER_CHAR_IMAGE_PATH).convert('RGBA')
+                # 预处理：调整大小和透明度（缩小以适应720p）
+                winter_char_resized = winter_char.resize((367, 533))  # 从550x800缩小
+                # 使用PIL的内置方法调整透明度，比逐像素快得多
+                alpha = winter_char_resized.split()[3]  # 获取alpha通道
+                alpha = alpha.point(lambda p: int(p * 0.65))  # 批量处理透明度
+                winter_char_resized.putalpha(alpha)
+                cls._cached_winter_char_alpha = winter_char_resized
+            except (FileNotFoundError, IOError) as e:
+                logger.warning(f"加载冬季角色图片失败: {e}")
+                cls._cached_winter_char_alpha = Image.new('RGBA', (367, 533), (150, 200, 255, 165))
+
+        return cls._cached_bird_image, cls._cached_winter_char_alpha
+
+    @classmethod
+    def _get_font(cls, size: int) -> ImageFont.FreeTypeFont:
+        """获取字体（带缓存）"""
+        # 检查缓存
+        if size in cls._cached_fonts:
+            return cls._cached_fonts[size]
+
         font_paths = [
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
@@ -77,6 +97,8 @@ class ScheduleImageGenerator:
                     font = ImageFont.truetype(path, size)
                     test_bbox = font.getbbox("测试")
                     if test_bbox[2] - test_bbox[0] > 0:
+                        # 缓存字体
+                        cls._cached_fonts[size] = font
                         return font
                 except Exception:
                     continue
@@ -84,28 +106,18 @@ class ScheduleImageGenerator:
         raise RuntimeError("未找到可用的中文字体")
 
     @staticmethod
-    def _draw_rounded_rectangle(
-        draw: ImageDraw.ImageDraw,
-        coords: tuple,
-        radius: int,
-        fill: tuple,
-        outline: tuple = None,
-        width: int = 2
-    ):
+    def _draw_rounded_rectangle(draw, coords, radius, fill, outline=None, width=2):
         """绘制圆角矩形"""
         x1, y1, x2, y2 = coords
-
-        # 绘制主体
+        if x2 <= x1 or y2 <= y1 or radius * 2 > min(x2 - x1, y2 - y1):
+            draw.rectangle([x1, y1, x2, y2], fill=fill, outline=outline, width=width)
+            return
         draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=fill)
         draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=fill)
-
-        # 四个圆角
         draw.pieslice([x1, y1, x1 + radius * 2, y1 + radius * 2], 180, 270, fill=fill)
         draw.pieslice([x2 - radius * 2, y1, x2, y1 + radius * 2], 270, 360, fill=fill)
         draw.pieslice([x1, y2 - radius * 2, x1 + radius * 2, y2], 90, 180, fill=fill)
         draw.pieslice([x2 - radius * 2, y2 - radius * 2, x2, y2], 0, 90, fill=fill)
-
-        # 绘制边框
         if outline:
             draw.arc([x1, y1, x1 + radius * 2, y1 + radius * 2], 180, 270, fill=outline, width=width)
             draw.arc([x2 - radius * 2, y1, x2, y1 + radius * 2], 270, 360, fill=outline, width=width)
@@ -117,268 +129,474 @@ class ScheduleImageGenerator:
             draw.line([x2, y1 + radius, x2, y2 - radius], fill=outline, width=width)
 
     @staticmethod
-    def _create_gradient_background(width: int, height: int) -> Image.Image:
-        """创建渐变背景"""
-        base = Image.new('RGB', (width, height), ScheduleImageGenerator.BG_START_COLOR)
+    def _draw_snowflake(draw, x, y, size, color):
+        """绘制雪花"""
+        for angle in range(0, 360, 60):
+            rad = math.radians(angle)
+            end_x = x + size * math.cos(rad)
+            end_y = y + size * math.sin(rad)
+            draw.line([(x, y), (end_x, end_y)], fill=color, width=2)
 
-        for y in range(height):
-            r1, g1, b1 = ScheduleImageGenerator.BG_START_COLOR
-            r2, g2, b2 = ScheduleImageGenerator.BG_END_COLOR
-
-            ratio = y / height
-            r = int(r1 + (r2 - r1) * ratio)
-            g = int(g1 + (g2 - g1) * ratio)
-            b = int(b1 + (b2 - b1) * ratio)
-
-            draw = ImageDraw.Draw(base)
-            draw.line([(0, y), (width, y)], fill=(r, g, b))
-
-        return base
+            branch_size = size * 0.4
+            for branch_angle in [-30, 30]:
+                branch_rad = math.radians(angle + branch_angle)
+                branch_x = x + size * 0.6 * math.cos(rad)
+                branch_y = y + size * 0.6 * math.sin(rad)
+                branch_end_x = branch_x + branch_size * math.cos(branch_rad)
+                branch_end_y = branch_y + branch_size * math.sin(branch_rad)
+                draw.line([(branch_x, branch_y), (branch_end_x, branch_end_y)], fill=color, width=1)
 
     @staticmethod
-    def _wrap_text(text: str, max_width: int, font: ImageFont.FreeTypeFont) -> list:
-        """文本自动换行"""
-        lines = []
-        for line in text.split('\n'):
-            if not line:
-                lines.append('')
-                continue
+    def _parse_time_str(time_str: str) -> tuple:
+        """解析时间字符串，返回开始和结束的分钟数"""
+        try:
+            parts = time_str.split('-')
+            if len(parts) != 2:
+                return (0, 0)
 
-            current_line = ''
-            for char in line:
-                test_line = current_line + char
-                bbox = font.getbbox(test_line)
-                w = bbox[2] - bbox[0]
+            start_time = parts[0].strip().split(':')
+            end_time = parts[1].strip().split(':')
 
-                if w <= max_width:
-                    current_line = test_line
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = char
+            start_minutes = int(start_time[0]) * 60 + int(start_time[1])
+            end_minutes = int(end_time[0]) * 60 + int(end_time[1])
 
-            if current_line:
-                lines.append(current_line)
+            return (start_minutes, end_minutes)
+        except (ValueError, IndexError, AttributeError):
+            return (0, 0)
 
-        return lines
+    @staticmethod
+    def _get_activity_status(time_str: str) -> str:
+        """获取活动状态: current/completed/upcoming"""
+        now = datetime.now()
+        current_minutes = now.hour * 60 + now.minute
+
+        start_minutes, end_minutes = ScheduleImageGenerator._parse_time_str(time_str)
+
+        if start_minutes <= current_minutes < end_minutes:
+            return "current"
+        elif current_minutes >= end_minutes:
+            return "completed"
+        else:
+            return "upcoming"
+
+    # 🆕 生成图片保存路径（相对于插件根目录）
+    SCHEDULE_IMAGE_PATH = PLUGIN_ROOT / "data" / "images" / "schedule_today.jpg"
+
+    # 🆕 分辨率限制（防止OOM）
+    MAX_WIDTH = 1920
+    MAX_HEIGHT = 1080
+    DEFAULT_WIDTH = 1280
+    DEFAULT_HEIGHT = 720
 
     @staticmethod
     def generate_schedule_image(
         title: str,
         schedule_items: List[Dict[str, Any]],
-        width: int = 1920
-    ) -> Tuple[bytes, str]:
+        width: int = None  # None表示使用默认值
+    ) -> Tuple[str, str]:
         """
-        生成日程图片
+        生成日程图片（冬季主题，内存优化）
 
         Args:
             title: 标题（如"今日日程"）
-            schedule_items: 日程项列表，每项包含:
-                - time: 时间字符串 "HH:MM-HH:MM"
-                - name: 活动名称
-                - description: 活动描述
-                - goal_type: 目标类型
-            width: 图片宽度（默认1920，横屏）
+            schedule_items: 日程项列表
+            width: 图片宽度（None=使用默认1280，最大1920）
 
         Returns:
-            (图片字节数据, base64编码字符串)
+            (图片路径, base64编码字符串)
         """
-        font_title = ScheduleImageGenerator._get_font(ScheduleImageGenerator.TITLE_SIZE)
-        font_subtitle = ScheduleImageGenerator._get_font(ScheduleImageGenerator.SUBTITLE_SIZE)
-        font_text = ScheduleImageGenerator._get_font(ScheduleImageGenerator.TEXT_SIZE)
-        font_time = ScheduleImageGenerator._get_font(ScheduleImageGenerator.TIME_SIZE)
+        # 🆕 使用默认值或限制最大分辨率
+        if width is None:
+            width = ScheduleImageGenerator.DEFAULT_WIDTH
+        else:
+            width = min(width, ScheduleImageGenerator.MAX_WIDTH)
 
-        # 计算所需高度
-        content_width = width - ScheduleImageGenerator.PADDING * 2
-        max_text_width = content_width - ScheduleImageGenerator.CARD_PADDING * 2 - 80  # 留空间给emoji和时间
+        # 按比例计算高度（16:9）
+        height = int(width * 9 / 16)
+        height = min(height, ScheduleImageGenerator.MAX_HEIGHT)
 
-        # 标题区域高度
-        title_bbox = font_title.getbbox(title)
-        header_height = (
-            ScheduleImageGenerator.PADDING
-            + (title_bbox[3] - title_bbox[1])
-            + 30
-        )
+        # 使用缓存加载图片资源（性能优化）
+        bird, winter_char_alpha = ScheduleImageGenerator._load_images()
 
-        # 计算每个日程项的高度
-        total_items_height = 0
-        for item in schedule_items:
-            # 时间行 + 名称行 + 描述（可能多行）
-            item_height = ScheduleImageGenerator.CARD_PADDING
+        # 创建冬季主题背景
+        img = Image.new('RGB', (width, height), (240, 245, 252))
 
-            # 时间和名称在同一行
-            time_bbox = font_time.getbbox(item.get("time", ""))
-            name_bbox = font_subtitle.getbbox(item.get("name", ""))
-            item_height += max(time_bbox[3] - time_bbox[1], name_bbox[3] - name_bbox[1])
-            item_height += ScheduleImageGenerator.LINE_SPACING
+        # 蓝白渐变
+        draw = ImageDraw.Draw(img)
+        for y in range(height):
+            ratio = y / height
+            r = int(240 - 25 * ratio)
+            g = int(245 - 20 * ratio)
+            b = int(252 - 10 * ratio)
+            draw.line([(0, y), (width, y)], fill=(r, g, b))
 
-            # 描述（可能多行）
-            description = item.get("description", "")
-            if description:
-                wrapped_lines = ScheduleImageGenerator._wrap_text(
-                    description, max_text_width, font_text
-                )
-                for _ in wrapped_lines:
-                    text_bbox = font_text.getbbox('A')
-                    item_height += (text_bbox[3] - text_bbox[1]) + ScheduleImageGenerator.LINE_SPACING
+        # 冬季纹理（减少纹理点数量，降低内存占用）
+        texture_count = int(1500 * (width / 1280))  # 根据分辨率缩放
+        for _ in range(texture_count):
+            x = random.randint(0, width)
+            y = random.randint(0, height)
+            brightness = random.randint(-5, 15)
+            draw.point((x, y), fill=(245 + brightness, 248 + brightness, 255))
 
-            item_height += ScheduleImageGenerator.CARD_PADDING
-            total_items_height += item_height + ScheduleImageGenerator.ITEM_SPACING
-
-        # 总高度
-        height = header_height + total_items_height + ScheduleImageGenerator.PADDING
-
-        # 创建图片
-        img = ScheduleImageGenerator._create_gradient_background(width, height)
-
-        # 创建RGBA层用于半透明元素
+        # 🆕 复用overlay对象，减少内存分配
         overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
-        draw = ImageDraw.Draw(img)
 
-        # 绘制标题区域
-        y = ScheduleImageGenerator.PADDING
+        # 直接使用预处理的冬季角色（已调整透明度，性能优化）
+        # 根据实际宽度调整角色位置和大小
+        char_scale = width / 1280
+        char_x = int(width - 400 * char_scale)
+        char_y = int(height - 553 * char_scale)
+        if char_scale != 1.0:
+            # 缩放角色图片以适应分辨率
+            new_char_width = int(367 * char_scale)
+            new_char_height = int(533 * char_scale)
+            winter_char_scaled = winter_char_alpha.resize((new_char_width, new_char_height))
+            img.paste(winter_char_scaled, (char_x, char_y), winter_char_scaled)
+            del winter_char_scaled  # 立即释放
+        else:
+            img.paste(winter_char_alpha, (char_x, char_y), winter_char_alpha)
 
-        # 标题光晕
-        glow_radius = 60
-        for i in range(3):
-            alpha = int(ScheduleImageGenerator.GLOW_COLOR[3] * (1 - i / 3))
-            r, g, b = ScheduleImageGenerator.GLOW_COLOR[:3]
-            draw_overlay.ellipse(
-                [width//2 - glow_radius, y - glow_radius//2,
-                 width//2 + glow_radius, y + glow_radius//2],
-                fill=(r, g, b, alpha)
-            )
+        # 雪花（根据分辨率调整数量）
+        snowflake_count_large = int(12 * char_scale)
+        snowflake_count_small = int(25 * char_scale)
+        snowflakes = []
+        for _ in range(snowflake_count_large):
+            sx = random.randint(int(100 * char_scale), width - int(100 * char_scale))
+            sy = random.randint(int(50 * char_scale), height - int(100 * char_scale))
+            size = random.randint(15, 25)
+            snowflakes.append((sx, sy, size, (220, 235, 255, 180)))
 
-        # 绘制主标题
-        title_width = title_bbox[2] - title_bbox[0]
-        title_x = (width - title_width) // 2
-        draw.text((title_x, y), title, fill=ScheduleImageGenerator.TITLE_COLOR, font=font_title)
-        y += (title_bbox[3] - title_bbox[1]) + 20
+        for _ in range(snowflake_count_small):
+            sx = random.randint(int(50 * char_scale), width - int(50 * char_scale))
+            sy = random.randint(0, height)
+            size = random.randint(8, 14)
+            snowflakes.append((sx, sy, size, (230, 240, 255, 140)))
 
-        # 装饰线
-        draw.line(
-            [(width//2 - 100, y), (width//2 + 100, y)],
-            fill=ScheduleImageGenerator.ACCENT_COLOR,
-            width=3
-        )
-        y += 10
+        for sx, sy, size, color in snowflakes:
+            ScheduleImageGenerator._draw_snowflake(draw_overlay, sx, sy, size, color)
 
-        # 绘制日程项
-        x_offset = ScheduleImageGenerator.PADDING
+        # 合并overlay到主图像
+        img.paste(overlay, (0, 0), overlay)
 
-        for item in schedule_items:
+        # 🆕 清空overlay以复用
+        draw_overlay.rectangle([(0, 0), (width, height)], fill=(0, 0, 0, 0))
+
+        # 字体（根据分辨率缩放）
+        font_scale = width / 1280
+        font_title = ScheduleImageGenerator._get_font(int(40 * font_scale))
+        font_text = ScheduleImageGenerator._get_font(int(21 * font_scale))
+        font_time = ScheduleImageGenerator._get_font(int(19 * font_scale))
+        font_small = ScheduleImageGenerator._get_font(int(16 * font_scale))
+
+        # 标题区域（上移优化）
+        title_y = int(40 * font_scale)
+
+        # 小鸟头像
+        bird_size = int(90 * font_scale)
+        bird_avatar = bird.resize((bird_size, bird_size))
+        mask = Image.new('L', (bird_size, bird_size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse([0, 0, bird_size, bird_size], fill=255)
+
+        bird_avatar_circle = Image.new('RGBA', (bird_size, bird_size), (0, 0, 0, 0))
+        bird_avatar_circle.paste(bird_avatar, (0, 0), mask)
+        # 🆕 释放不再使用的临时对象
+        del bird_avatar
+        del mask
+        del mask_draw
+
+        for r in range(int(55 * font_scale), 0, int(-8 * font_scale)):
+            alpha = int(100 * (r / 55))
+            draw_overlay.ellipse([int(70 * font_scale) - r, title_y - r, int(160 * font_scale) + r, title_y + bird_size + r],
+                                fill=(180, 210, 255, alpha))
+
+        img.paste(overlay, (0, 0), overlay)
+        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw_overlay = ImageDraw.Draw(overlay)
+
+        draw.ellipse([70, title_y, 160, title_y + 90], outline=(150, 200, 255), width=4)
+        img.paste(bird_avatar_circle, (70, title_y), bird_avatar_circle)
+
+        # 标题（移除" Schedule"后缀，标题更简洁）
+        title_display = title  # 直接使用传入的标题，不再添加" Schedule"
+        title_x = 180
+
+        for offset in range(3, 0, -1):
+            shadow_color = (100 + offset * 20, 130 + offset * 25, 180 + offset * 20)
+            draw.text((title_x + offset, title_y + offset), title_display, fill=shadow_color, font=font_title)
+
+        title_color = (70, 120, 200)
+        draw.text((title_x, title_y), title_display, fill=title_color, font=font_title)
+
+        # 副标题（动态大小的透明框）
+        subtitle = "冬日温暖时光~"
+        subtitle_y = title_y + 75
+
+        # 计算文字的实际大小，让透明框刚好比字体大一圈
+        subtitle_bbox = font_small.getbbox(subtitle)
+        subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
+        subtitle_height = subtitle_bbox[3] - subtitle_bbox[1]
+
+        # 透明框：比文字大一圈（左右各5px，上下各3px）
+        padding_x = 5
+        padding_y = 3
+        ScheduleImageGenerator._draw_rounded_rectangle(draw_overlay,
+                                                        (title_x - padding_x, subtitle_y - padding_y,
+                                                         title_x + subtitle_width + padding_x, subtitle_y + subtitle_height + padding_y),
+                                                        radius=8, fill=(255, 255, 255, 180))
+        img.paste(overlay, (0, 0), overlay)
+        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw_overlay = ImageDraw.Draw(overlay)
+
+        draw.text((title_x, subtitle_y), subtitle, fill=(120, 160, 220), font=font_small)
+
+        # 装饰线（上移优化，延伸覆盖卡片+角色区域）
+        line_y = title_y + 95
+        line_end_x = 1240  # 覆盖日程卡片(870px) + 冬季角色(367px)
+        for i in range(4):
+            alpha = 160 - i * 30
+            draw.line([(80, line_y + i), (line_end_x, line_y + i)],
+                     fill=(150, 190, 240, alpha), width=1)
+
+        # 找到当前或下一个日程的索引
+        target_index = -1
+        current_time_minutes = datetime.now().hour * 60 + datetime.now().minute
+
+        # 优先查找正在进行的日程
+        for idx, item in enumerate(schedule_items):
+            status = ScheduleImageGenerator._get_activity_status(item.get("time", ""))
+            if status == "current":
+                target_index = idx
+                break
+
+        # 如果没有正在进行的，找下一个即将开始的
+        if target_index == -1:
+            for idx, item in enumerate(schedule_items):
+                time_str = item.get("time", "")
+                start_minutes, _ = ScheduleImageGenerator._parse_time_str(time_str)
+                if start_minutes > current_time_minutes:
+                    target_index = idx
+                    break
+
+        # 如果还是没找到（所有日程都已完成），使用最后一个
+        if target_index == -1 and schedule_items:
+            target_index = len(schedule_items) - 1
+
+        # 固定显示5个日程，目标日程在第3个位置（索���2）
+        display_items = []
+        display_target_index = -1
+
+        if len(schedule_items) <= 5:
+            # 日程不足5个，全部显示
+            display_items = schedule_items
+            display_target_index = target_index if target_index >= 0 else 0
+        else:
+            # 日程超过5个，选择5个显示，目标在第3个位置（索引2）
+            if target_index < 2:
+                # 目标在前面，从头开始取5个
+                display_items = schedule_items[:5]
+                display_target_index = target_index
+            elif target_index >= len(schedule_items) - 2:
+                # 目标在后面，从后往前取5个
+                display_items = schedule_items[-5:]
+                # 计算目标在新列表中的位置
+                display_target_index = 5 - (len(schedule_items) - target_index)
+            else:
+                # 目标在中间，让它显示在第3个位置（索引2）
+                start_idx = target_index - 2
+                display_items = schedule_items[start_idx:start_idx + 5]
+                display_target_index = 2  # 目标在第3个位置
+
+        # 起始y坐标（整体上移）
+        y = 155
+        card_spacing = 115  # 增加卡片间距，留出更多空白
+
+        # 活动卡片（使用display_items）
+        for item in display_items:
             time_str = item.get("time", "")
             name = item.get("name", "")
-            description = item.get("description", "")
+            desc = item.get("description", "")
             goal_type = item.get("goal_type", "custom")
 
-            # 获取emoji和颜色
-            emoji, type_color = ScheduleImageGenerator.TYPE_EMOJIS.get(
-                goal_type,
-                ScheduleImageGenerator.TYPE_EMOJIS["custom"]
-            )
+            # 获取图标
+            icon = ScheduleImageGenerator.TYPE_ICONS.get(goal_type, "◈")
 
-            # 计算卡片高度
-            card_height = ScheduleImageGenerator.CARD_PADDING
-            time_bbox = font_time.getbbox(time_str)
-            name_bbox = font_subtitle.getbbox(name)
-            card_height += max(time_bbox[3] - time_bbox[1], name_bbox[3] - name_bbox[1])
-            card_height += ScheduleImageGenerator.LINE_SPACING
+            # 判断是否是目标日程（高亮显示）
+            item_index = display_items.index(item)
+            is_target = (item_index == display_target_index)
 
-            if description:
-                wrapped_lines = ScheduleImageGenerator._wrap_text(
-                    description, max_text_width, font_text
-                )
-                for _ in wrapped_lines:
-                    text_bbox = font_text.getbbox('A')
-                    card_height += (text_bbox[3] - text_bbox[1]) + ScheduleImageGenerator.LINE_SPACING
+            # 冬季色系
+            colors = [(150, 200, 255), (120, 180, 255), (180, 220, 255), (200, 180, 255), (220, 200, 255)]
+            color = colors[min(item_index, len(colors) - 1)]
 
-            card_height += ScheduleImageGenerator.CARD_PADDING
+            card_x = 80         # 左边距（与装饰线对齐）
+            card_width = 830    # 保持右边缘不变
+            card_height = 100
 
-            # 绘制卡片阴影
-            shadow_offset = 3
-            ScheduleImageGenerator._draw_rounded_rectangle(
-                draw_overlay,
-                (x_offset + shadow_offset,
-                 y + shadow_offset,
-                 x_offset + content_width + shadow_offset,
-                 y + card_height + shadow_offset),
-                ScheduleImageGenerator.CARD_RADIUS,
-                fill=ScheduleImageGenerator.SHADOW_COLOR
-            )
+            # 目标日程高亮
+            if is_target:
+                for i in range(6):
+                    glow_offset = i * 10
+                    alpha = int(140 - i * 22)
+                    draw_overlay.rounded_rectangle(
+                        [card_x - glow_offset, y - glow_offset,
+                         card_x + card_width + glow_offset, y + card_height + glow_offset],
+                        radius=26,
+                        fill=(150, 220, 255, alpha)
+                    )
 
-            # 绘制卡片背景
-            ScheduleImageGenerator._draw_rounded_rectangle(
-                draw_overlay,
-                (x_offset, y,
-                 x_offset + content_width, y + card_height),
-                ScheduleImageGenerator.CARD_RADIUS,
-                fill=ScheduleImageGenerator.CARD_BG_COLOR,
-                outline=ScheduleImageGenerator.CARD_BORDER_COLOR,
-                width=2
-            )
-
-            # 合并overlay
             img.paste(overlay, (0, 0), overlay)
             overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
             draw_overlay = ImageDraw.Draw(overlay)
 
-            # 绘制内容
-            card_y = y + ScheduleImageGenerator.CARD_PADDING
-            card_x = x_offset + ScheduleImageGenerator.CARD_PADDING
-
-            # 绘制emoji（左侧）
-            draw.text(
-                (card_x, card_y),
-                emoji,
-                font=font_subtitle
-            )
-
-            # 绘制时间（emoji右侧）
-            draw.text(
-                (card_x + 40, card_y),
-                time_str,
-                fill=ScheduleImageGenerator.TIME_COLOR,
-                font=font_time
-            )
-
-            # 绘制名称（时间右侧）
-            time_width = font_time.getbbox(time_str)[2] - font_time.getbbox(time_str)[0]
-            draw.text(
-                (card_x + 40 + time_width + 20, card_y),
-                name,
-                fill=type_color,
-                font=font_subtitle
-            )
-
-            card_y += max(time_bbox[3] - time_bbox[1], name_bbox[3] - name_bbox[1])
-            card_y += ScheduleImageGenerator.LINE_SPACING
-
-            # 绘制描述
-            if description:
-                wrapped_lines = ScheduleImageGenerator._wrap_text(
-                    description, max_text_width, font_text
+            # 阴影
+            for i in range(3):
+                shadow_offset = 10 + i * 3
+                shadow_alpha = 80 - i * 20
+                ScheduleImageGenerator._draw_rounded_rectangle(
+                    draw_overlay,
+                    (card_x + shadow_offset, y + shadow_offset,
+                     card_x + card_width + shadow_offset, y + card_height + shadow_offset),
+                    radius=26,
+                    fill=(180, 200, 220, shadow_alpha)
                 )
-                for wrapped_line in wrapped_lines:
-                    draw.text(
-                        (card_x + 60, card_y),
-                        wrapped_line,
-                        fill=ScheduleImageGenerator.TEXT_COLOR,
-                        font=font_text
+
+            # 卡片背景
+            ScheduleImageGenerator._draw_rounded_rectangle(
+                draw_overlay,
+                (card_x, y, card_x + card_width, y + card_height),
+                radius=26,
+                fill=(250, 252, 255, 250),
+                outline=color,
+                width=5 if is_target else 4
+            )
+
+            img.paste(overlay, (0, 0), overlay)
+            overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+            draw_overlay = ImageDraw.Draw(overlay)
+
+            # 左侧渐变条
+            for i in range(18):
+                x_offset = card_x + i
+                gradient_ratio = i / 18
+                r = int(color[0] * (1 - gradient_ratio * 0.2))
+                g = int(color[1] * (1 - gradient_ratio * 0.2))
+                b = int(color[2] * (1 - gradient_ratio * 0.1))
+                draw.line([(x_offset, y + 26), (x_offset, y + card_height - 26)],
+                         fill=(r, g, b), width=1)
+
+            # 图标（调整位置适应100px高度）
+            icon_x, icon_y = card_x + 40, y + 35  # 从52→35
+            for i in range(2):
+                draw.text((icon_x + 3 - i, icon_y + 3 - i), icon,
+                         fill=(200, 210, 230), font=font_title)
+            draw.text((icon_x, icon_y), icon, fill=color, font=font_title)
+
+            # 时间（调整位置）
+            time_x = card_x + 120  # 从135→120
+            for dx, dy in [(1, 0), (0, 1)]:
+                draw.text((time_x + dx, y + 20 + dy), time_str, fill=(130, 150, 180), font=font_time)  # 从28→20
+            draw.text((time_x, y + 20), time_str, fill=(100, 130, 170), font=font_time)
+
+            # 名称（调整位置）
+            name_y = y + 45  # 从68→45
+            for dx, dy in [(1, 0), (0, 1), (1, 1)]:
+                draw.text((time_x + dx, name_y + dy), name, fill=(90, 120, 160), font=font_text)
+            draw.text((time_x, name_y), name, fill=(70, 100, 140), font=font_text)
+
+            # 描述（调整位置）
+            draw.text((time_x, y + 72), desc, fill=(130, 150, 180), font=font_small)  # 从110→72
+
+            # 状态标签（调整位置适应100px高度，根据实际时间判断状态）
+            tag_x = card_x + card_width - 140  # 从-160→-140
+            tag_y = y + 30  # 从50→30（更靠近顶部）
+
+            # 获取实际状态
+            status = ScheduleImageGenerator._get_activity_status(time_str)
+
+            if status == "current":
+                status_text = "进行中"
+                tag_color = (100, 200, 255)
+                tag_bg = (100, 200, 255, 240)
+            elif status == "completed":
+                status_text = "已完成"
+                tag_color = (180, 220, 255)
+                tag_bg = (180, 220, 255, 240)
+            else:
+                status_text = "未开始"
+                tag_color = (200, 210, 255)
+                tag_bg = (200, 210, 255, 240)
+
+            # 只给目标日程添加光晕效果
+            if is_target:
+                for i in range(4):
+                    glow_size = i * 6
+                    draw_overlay.ellipse(
+                        [tag_x - glow_size, tag_y - glow_size,
+                         tag_x + 100 + glow_size, tag_y + 40 + glow_size],  # 减小标签尺寸
+                        fill=(*tag_color[:3], 60 - i * 14)
                     )
-                    text_bbox = font_text.getbbox('A')
-                    card_y += (text_bbox[3] - text_bbox[1]) + ScheduleImageGenerator.LINE_SPACING
 
-            y += card_height + ScheduleImageGenerator.ITEM_SPACING
+            draw_overlay.ellipse([tag_x, tag_y, tag_x + 100, tag_y + 40], fill=tag_bg)  # 减小标签尺寸
 
-        # 最终合并overlay
+            img.paste(overlay, (0, 0), overlay)
+            overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+            draw_overlay = ImageDraw.Draw(overlay)
+
+            for dx, dy in [(1, 0), (0, 1)]:
+                draw.text((tag_x + 20 + dx, tag_y + 10 + dy), status_text,  # 调整文字位置：28,14→20,10
+                         fill=(255, 255, 255), font=font_small)
+            draw.text((tag_x + 20, tag_y + 10), status_text, fill=(255, 255, 255), font=font_small)
+
+            # 装饰雪花（调整位置）
+            ScheduleImageGenerator._draw_snowflake(draw_overlay, card_x + card_width - 35, y + 25, 8, (*color, 180))  # 缩小雪花
+
+            img.paste(overlay, (0, 0), overlay)
+            overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+            draw_overlay = ImageDraw.Draw(overlay)
+
+            y += card_spacing  # 使用优化后的间距
+
+        # 底部签名（移到图片左边缘）
+        signature = "Powered by Mai-Bot"
+        sig_x = 10  # 靠近图片左边缘
+        sig_y = height - 25  # 再往下移
+
+        # 计算文字的实际大小，让透明框刚好比字体大一圈
+        text_bbox = font_small.getbbox(signature)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+
+        # 透明框：比文字大一圈（左右各5px，上下各3px）
+        padding_x = 5
+        padding_y = 3
+        ScheduleImageGenerator._draw_rounded_rectangle(
+            draw_overlay,
+            (sig_x - padding_x, sig_y - padding_y,
+             sig_x + text_width + padding_x, sig_y + text_height + padding_y),
+            radius=6,
+            fill=(255, 255, 255, 180)
+        )
         img.paste(overlay, (0, 0), overlay)
 
-        # 转换为字节和base64
+        draw.text((sig_x, sig_y), signature, fill=(120, 160, 220), font=font_small)
+
+        # 🆕 确保目录存在（使用 Path 对象）
+        ScheduleImageGenerator.SCHEDULE_IMAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # 转换为RGB格式（JPEG不支持透明度）
+        rgb_img = Image.new('RGB', img.size, (240, 245, 252))  # 使用浅蓝色背景
+        rgb_img.paste(img, (0, 0))
+
+        # 保存为JPEG格式，质量85%（平衡清晰度和文件大小）
+        rgb_img.save(str(ScheduleImageGenerator.SCHEDULE_IMAGE_PATH), format='JPEG', quality=85, optimize=True)
+
+        # 同时生成base64（用于发送）
         img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='PNG')
+        rgb_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
         img_bytes = img_byte_arr.getvalue()
         img_base64 = base64.b64encode(img_bytes).decode('utf-8')
 
-        return img_bytes, img_base64
+        return str(ScheduleImageGenerator.SCHEDULE_IMAGE_PATH), img_base64
+
