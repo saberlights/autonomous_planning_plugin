@@ -23,6 +23,8 @@ class ScheduleAutoScheduler:
         is_running (bool): 任务运行状态
         task: 异步任务对象
         logger: 日志记录器
+        _retry_count (int): P1优化 - 连续失败计数
+        _max_retry_wait (int): P1优化 - 最大重试等待时间（秒）
 
     Methods:
         start: 启动定时任务
@@ -43,6 +45,10 @@ class ScheduleAutoScheduler:
         self.is_running = False
         self.task = None
         self.logger = get_logger("ScheduleAutoScheduler")
+
+        # P1优化：指数退避参数
+        self._retry_count = 0
+        self._max_retry_wait = 300  # 最大等待5分钟
 
         # 导入依赖（延迟导入避免循环依赖）
         from .goal_manager import get_goal_manager
@@ -143,13 +149,18 @@ class ScheduleAutoScheduler:
                 await asyncio.sleep(wait_seconds)
                 if self.is_running:
                     await self._generate_today_schedule()
+                    # 成功后重置重试计数
+                    self._retry_count = 0
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.logger.error(f"定时任务出错: {e}", exc_info=True)
-                # 出错后等待1小时再重试
-                await asyncio.sleep(3600)
+                # P1优化：指数退避重试（30s, 60s, 120s, 240s, 300s）
+                self._retry_count += 1
+                wait_time = min(30 * (2 ** (self._retry_count - 1)), self._max_retry_wait)
+                self.logger.info(f"将在 {wait_time} 秒后重试（第 {self._retry_count} 次）")
+                await asyncio.sleep(wait_time)
 
     async def _generate_today_schedule(self):
         """

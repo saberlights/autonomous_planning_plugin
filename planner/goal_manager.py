@@ -202,6 +202,7 @@ class GoalManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.goals_file = self.data_dir / "goals.json"
+        self.backup_file = self.data_dir / "goals.json.bak"  # P2优化：备份文件
         self.goals: Dict[str, Goal] = {}
 
         # 🆕 P1优化：延迟保存机制
@@ -229,19 +230,28 @@ class GoalManager:
 
     def _save_goals(self):
         """
-        原子保存目标到文件（带文件锁，防止并发冲突）
+        原子保存目标到文件（带文件锁和备份）
 
         改进：
         1. 使用临时文件 + 原子移动，防止写入中断导致数据损坏
         2. 使用文件锁（fcntl），解决并发写入问题
         3. 添加非阻塞锁 + 重试机制，防止永久阻塞
-        4. 异常时自动清理临时文件
+        4. P2优化：保存前创建备份
+        5. 异常时自动清理临时文件
         """
         try:
             data = [goal.to_dict() for goal in self.goals.values()]
 
             # 确保数据目录存在
             self.data_dir.mkdir(parents=True, exist_ok=True)
+
+            # P2优化：保存前创建备份（如果原文件存在）
+            if self.goals_file.exists():
+                try:
+                    shutil.copy2(self.goals_file, self.backup_file)
+                    logger.debug(f"已创建备份: {self.backup_file}")
+                except Exception as e:
+                    logger.warning(f"创建备份失败: {e}")
 
             # 创建临时文件（在同一目录，确保原子移动）
             temp_fd, temp_path = tempfile.mkstemp(
@@ -474,6 +484,51 @@ class GoalManager:
         """获取可以执行的目标"""
         active_goals = self.get_active_goals()
         return [g for g in active_goals if g.should_execute_now()]
+
+    def get_schedule_goals(self, chat_id: str = "global", date_str: Optional[str] = None) -> List[Goal]:
+        """
+        P2优化：获取日程目标（带 time_window 的目标）
+
+        消除重复代码，统一日程目标的获取逻辑。
+
+        Args:
+            chat_id: 聊天ID，默认为 "global"
+            date_str: 日期字符串（YYYY-MM-DD），默认为今天
+
+        Returns:
+            符合条件的日程目标列表
+        """
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        goals = self.get_all_goals(chat_id=chat_id)
+        schedule_goals = []
+
+        for goal in goals:
+            # 检查是否有 time_window（日程类型的标志）
+            has_time_window = False
+            if goal.parameters and "time_window" in goal.parameters:
+                has_time_window = True
+            elif goal.conditions and "time_window" in goal.conditions:
+                has_time_window = True
+
+            if has_time_window:
+                # 检查创建日期
+                goal_date = None
+                if goal.created_at:
+                    try:
+                        if isinstance(goal.created_at, str):
+                            goal_date = goal.created_at.split("T")[0]
+                        else:
+                            goal_date = goal.created_at.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+
+                # 只返回指定日期的日程
+                if goal_date == date_str:
+                    schedule_goals.append(goal)
+
+        return schedule_goals
 
     def update_goal(
         self,

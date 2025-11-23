@@ -14,6 +14,7 @@ from src.common.logger import get_logger
 from src.plugin_system.apis import llm_api, config_api
 
 from .goal_manager import GoalManager, GoalPriority
+from ..utils.time_utils import time_slot_to_minutes, format_minutes_to_time
 
 logger = get_logger("autonomous_planning.schedule_generator")
 
@@ -98,15 +99,16 @@ class ScheduleSemanticValidator:
     - 优先级匹配
     """
 
-    # 合理时间范围（小时）
+    # 合理时间范围（小时）- 放宽限制以适应不同角色设定
     REASONABLE_TIME_RANGES = {
         "meal": {
-            "早餐": (6, 10),   # 早餐应该在6-10点
-            "午餐": (11, 14),  # 午餐应该在11-14点
-            "晚餐": (17, 21),  # 晚餐应该在17-21点
-            "早饭": (6, 10),
-            "午饭": (11, 14),
-            "晚饭": (17, 21),
+            # 用餐时间放宽，适应不同生活习惯
+            "早餐": (5, 12),   # 早餐可以5-12点
+            "午餐": (10, 16),  # 午餐可以10-16点
+            "晚餐": (15, 23),  # 晚餐可以15-23点
+            "早饭": (5, 12),
+            "午饭": (10, 16),
+            "晚饭": (15, 23),
         },
         "daily_routine": {
             "睡觉": [(22, 24), (0, 6)],  # 22点-次日6点（跨午夜）
@@ -242,7 +244,8 @@ class ScheduleSemanticValidator:
             if duration < 15:
                 return f"持续时间过短（{duration}分钟），建议至少15分钟"
 
-            if duration > 180 and "自由" not in name and "休息" not in name:
+            # 睡觉、休息、自由时间可以超过3小时
+            if duration > 180 and "自由" not in name and "休息" not in name and "睡" not in name and "安睡" not in name:
                 return f"持续时间过长（{duration}分钟），建议不超过3小时"
 
         return None
@@ -302,14 +305,20 @@ class ScheduleGenerator:
         Returns:
             JSON Schema字典
         """
+        # 从配置读取参数
+        min_activities = self.config.get('min_activities', 6)
+        max_activities = self.config.get('max_activities', 12)
+        min_desc_len = self.config.get('min_description_length', 15)
+        max_desc_len = self.config.get('max_description_length', 30)
+
         return {
             "type": "object",
             "required": ["schedule_items"],
             "properties": {
                 "schedule_items": {
                     "type": "array",
-                    "minItems": 10,  # 至少10个活动
-                    "maxItems": 25,  # 最多25个活动
+                    "minItems": min_activities,
+                    "maxItems": max_activities,
                     "items": {
                         "type": "object",
                         "required": ["name", "description", "time_slot", "goal_type", "priority"],
@@ -322,9 +331,9 @@ class ScheduleGenerator:
                             },
                             "description": {
                                 "type": "string",
-                                "minLength": 30,
-                                "maxLength": 100,
-                                "description": "活动描述（叙述风格，30-100字）"
+                                "minLength": min_desc_len,
+                                "maxLength": max_desc_len,
+                                "description": f"活动描述（叙述风格，{min_desc_len}-{max_desc_len}字）"
                             },
                             "time_slot": {
                                 "type": "string",
@@ -912,30 +921,26 @@ class ScheduleGenerator:
                 })
                 continue
 
-            try:
-                # 解析开始时间为分钟数
-                parts = time_slot.split(":")
-                hour = int(parts[0])
-                minute = int(parts[1]) if len(parts) > 1 else 0
-                start_minutes = hour * 60 + minute
-
-                # 🔧 使用 interval_hours 计算结束时间
-                interval_hours = item.get("interval_hours", 1.0)
-                duration_minutes = int(interval_hours * 60)
-                end_minutes = start_minutes + duration_minutes
-
-                # 避免超过24小时
-                if end_minutes > 24 * 60:
-                    end_minutes = 24 * 60
-
-                items_with_time.append({
-                    'start': start_minutes,
-                    'end': end_minutes,
-                    'item': item
-                })
-            except (ValueError, IndexError) as e:
-                logger.warning(f"解析时间失败: {time_slot} - {e}，将忽略该项")
+            # P1优化：使用统一的工具函数解析时间
+            start_minutes = time_slot_to_minutes(time_slot)
+            if start_minutes is None:
+                logger.warning(f"解析时间失败: {time_slot}，将忽略该项")
                 continue
+
+            # 使用 interval_hours 计算结束时间
+            interval_hours = item.get("interval_hours", 1.0)
+            duration_minutes = int(interval_hours * 60)
+            end_minutes = start_minutes + duration_minutes
+
+            # 避免超过24小时
+            if end_minutes > 24 * 60:
+                end_minutes = 24 * 60
+
+            items_with_time.append({
+                'start': start_minutes,
+                'end': end_minutes,
+                'item': item
+            })
 
         # 按开始时间排序
         items_with_time.sort(key=lambda x: x['start'])
@@ -1033,10 +1038,8 @@ class ScheduleGenerator:
         return score
 
     def _format_time(self, minutes: int) -> str:
-        """将分钟数格式化为HH:MM"""
-        hours = minutes // 60
-        mins = minutes % 60
-        return f"{hours:02d}:{mins:02d}"
+        """将分钟数格式化为HH:MM（使用统一工具函数）"""
+        return format_minutes_to_time(minutes)
 
     def _calculate_quality_score(self, items: List[Dict], warnings: List[str]) -> float:
         """
@@ -1044,8 +1047,8 @@ class ScheduleGenerator:
 
         评分标准：
         - 基础分：0.5
-        - 活动数量合理（15-20个）：+0.2
-        - 描述长度充分（平均40字+）：+0.15
+        - 活动数量合理：+0.2
+        - 描述长度充分：+0.15
         - 时间覆盖全天：+0.15
         - 警告惩罚：每个警告-0.05（最多-0.3）
 
@@ -1055,20 +1058,27 @@ class ScheduleGenerator:
         if not items:
             return 0.0
 
+        # 从配置读取参数
+        min_activities = self.config.get('min_activities', 6)
+        max_activities = self.config.get('max_activities', 12)
+        min_desc_len = self.config.get('min_description_length', 15)
+        max_desc_len = self.config.get('max_description_length', 30)
+        target_desc_len = (min_desc_len + max_desc_len) // 2
+
         # 基础分
         score = 0.5
 
-        # 奖励：活动数量合理（15-20个）
-        if 15 <= len(items) <= 20:
+        # 奖励：活动数量合理
+        if min_activities <= len(items) <= max_activities:
             score += 0.2
-        elif len(items) >= 10:
+        elif len(items) >= min_activities - 2:
             score += 0.1
 
         # 奖励：描述长度充分
         avg_desc_len = sum(len(item.get('description', '')) for item in items) / len(items)
-        if avg_desc_len >= 40:
+        if avg_desc_len >= target_desc_len:
             score += 0.15
-        elif avg_desc_len >= 30:
+        elif avg_desc_len >= min_desc_len:
             score += 0.08
 
         # 惩罚：警告数量
@@ -1429,6 +1439,12 @@ class ScheduleGenerator:
         interest = config_api.get_global_config("personality.interest", "")
         bot_name = config_api.get_global_config("bot.nickname", "麦麦")
 
+        # 从配置读取生成参数
+        min_activities = self.config.get('min_activities', 6)
+        max_activities = self.config.get('max_activities', 12)
+        min_desc_len = self.config.get('min_description_length', 15)
+        max_desc_len = self.config.get('max_description_length', 30)
+
         # 时间信息
         today = datetime.now()
         date_str = today.strftime("%Y-%m-%d")
@@ -1451,8 +1467,8 @@ class ScheduleGenerator:
 状态: 心情{mood_seed}/100，活力{energy_level}/100
 
 【任务】生成今天的详细日程JSON：
-1. 15-20个活动，覆盖全天（00:00起床到睡觉）
-2. 每个description 40-60字，用自然叙述风格（像日记）
+1. {min_activities}-{max_activities}个活动，覆盖全天（00:00起床到睡觉）
+2. 每个description {min_desc_len}-{max_desc_len}字，用自然叙述风格（像日记）
 3. 体现人设：{personality[:50]}...
 4. 兴趣相关：{interest if interest else "日常生活"}
 5. 表达风格：{reply_style[:30] if reply_style else "自然随意"}
@@ -1463,11 +1479,10 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
 【JSON格式示例】
 {{
   "schedule_items": [
-    {{"name":"睡觉","description":"躺床上翻来覆去想了一堆事，后来做了个奇怪的梦","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":7.5}},
-    {{"name":"起床","description":"闹钟响了好几次才爬起来，整个人迷迷糊糊的","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","interval_hours":0.25}},
-    {{"name":"早餐","description":"泡了杯燕麦粥慢慢喝","goal_type":"meal","priority":"medium","time_slot":"08:00","interval_hours":0.5}},
-    {{"name":"上午学习","description":"图书馆看书做作业","goal_type":"study","priority":"high","time_slot":"09:00","interval_hours":2}},
-    ...（继续15-20个活动）
+    {{"name":"睡觉","description":"蜷在被窝里睡得很香","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":7.5}},
+    {{"name":"起床","description":"迷迷糊糊爬起来","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","interval_hours":0.25}},
+    {{"name":"早餐","description":"简单吃了点东西","goal_type":"meal","priority":"medium","time_slot":"08:00","interval_hours":0.5}},
+    ...（继续{min_activities}-{max_activities}个活动）
   ]
 }}
 
@@ -1479,7 +1494,8 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
 【要求】
 - 严格JSON格式，无注释
 - time_slot按时间递增（HH:MM格式）
-- description自然叙述，包含想法和感受
+- ⚠️ 必须无缝覆盖全天：每个活动结束时间 = 下个活动开始时间，不能有空档
+- description简洁自然，{min_desc_len}-{max_desc_len}字
 - 体现{weekday}特色（{"周末睡懒觉" if is_weekend else "工作日早起"}）
 - 符合心情{mood_seed}和活力{energy_level}
 """
@@ -1488,8 +1504,8 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
         if schema:
             prompt += f"""
 【Schema要求】
-- 10-25个活动（必须）
-- 必填：name(2-20字), description(30-100字), time_slot, goal_type, priority
+- {min_activities}-{max_activities}个活动（必须）
+- 必填：name(2-20字), description({min_desc_len}-{max_desc_len}字), time_slot, goal_type, priority
 - priority: high/medium/low
 - interval_hours: 0.5-24
 

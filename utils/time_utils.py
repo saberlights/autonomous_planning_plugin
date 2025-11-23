@@ -4,8 +4,10 @@
 提供时间窗口的解析和迁移功能，避免循环导入
 """
 
+from typing import Optional, Tuple, List, Union, Any
 
-def migrate_time_window(time_window):
+
+def migrate_time_window(time_window: Optional[List[Union[int, float]]]) -> Optional[List[int]]:
     """
     迁移旧格式时间窗口到新格式
 
@@ -48,7 +50,7 @@ def migrate_time_window(time_window):
     return time_window
 
 
-def parse_time_window(time_window):
+def parse_time_window(time_window: Optional[List[Union[int, float]]]) -> Tuple[Optional[int], Optional[int]]:
     """
     解析时间窗口，统一返回分钟格式
 
@@ -62,3 +64,85 @@ def parse_time_window(time_window):
     if not migrated:
         return None, None
     return migrated[0], migrated[1]
+
+
+def parse_time_slot(time_slot: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    解析 HH:MM 格式时间字符串为分钟数
+
+    Args:
+        time_slot: 时间字符串，如 "09:30"
+
+    Returns:
+        (hour, minute) 或 (None, None)
+    """
+    if not time_slot or not isinstance(time_slot, str):
+        return None, None
+
+    try:
+        parts = time_slot.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        return hour, minute
+    except (ValueError, IndexError):
+        return None, None
+
+
+def time_slot_to_minutes(time_slot: str) -> Optional[int]:
+    """
+    将 HH:MM 格式时间转换为从00:00开始的分钟数
+
+    Args:
+        time_slot: 时间字符串，如 "09:30"
+
+    Returns:
+        分钟数（如 570 表示 09:30）或 None
+    """
+    hour, minute = parse_time_slot(time_slot)
+    if hour is None:
+        return None
+    return hour * 60 + minute
+
+
+def format_minutes_to_time(minutes: int) -> str:
+    """
+    将分钟数格式化为 HH:MM 字符串
+
+    Args:
+        minutes: 从00:00开始的分钟数
+
+    Returns:
+        格式化的时间字符串，如 "09:30"
+    """
+    hour = minutes // 60
+    minute = minutes % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def get_time_window_from_goal(goal: Any) -> Tuple[int, int]:
+    """
+    从目标对象中提取时间窗口（统一接口）
+
+    优先从 parameters 读取，其次从 conditions 读取
+
+    Args:
+        goal: 目标对象
+
+    Returns:
+        (start_minutes, end_minutes) 元组，默认返回 (0, 60)
+    """
+    # 优先从parameters读取time_window，其次从conditions读取
+    time_window = None
+    if hasattr(goal, 'parameters') and goal.parameters and "time_window" in goal.parameters:
+        time_window = goal.parameters.get("time_window")
+    elif hasattr(goal, 'conditions') and goal.conditions and "time_window" in goal.conditions:
+        time_window = goal.conditions.get("time_window")
+
+    if not time_window:
+        return (0, 60)
+
+    start_minutes, end_minutes = parse_time_window(time_window)
+    if start_minutes is None:
+        return (0, 60)
+
+    return (start_minutes, end_minutes)

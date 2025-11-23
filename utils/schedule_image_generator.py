@@ -7,6 +7,7 @@ import io
 import base64
 import random
 import math
+import threading
 from typing import Tuple, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +21,13 @@ logger = get_logger("autonomous_planning.schedule_image_generator")
 class ScheduleImageGenerator:
     """生成日程图片"""
 
-    # 🆕 插件根目录（使用相对路径）
+    # P2优化：并发限制（最多3个并发生成）
+    _generation_semaphore = threading.Semaphore(3)
+
+    # 插件根目录（使用相对路径）
     PLUGIN_ROOT = Path(__file__).parent.parent
 
-    # 🆕 图片资源路径（相对于插件根目录）
+    # 图片资源路径（相对于插件根目录）
     BIRD_IMAGE_PATH = PLUGIN_ROOT / "assets" / "bird.jpg"
     WINTER_CHAR_IMAGE_PATH = PLUGIN_ROOT / "assets" / "winter_char.jpg"
 
@@ -193,8 +197,9 @@ class ScheduleImageGenerator:
     DEFAULT_WIDTH = 1280
     DEFAULT_HEIGHT = 720
 
-    @staticmethod
+    @classmethod
     def generate_schedule_image(
+        cls,
         title: str,
         schedule_items: List[Dict[str, Any]],
         width: int = None  # None表示使用默认值
@@ -210,7 +215,10 @@ class ScheduleImageGenerator:
         Returns:
             (图片路径, base64编码字符串)
         """
-        # 🆕 使用默认值或限制最大分辨率
+        # P2优化：使用信号量限制并发（最多3个并发生成）
+        cls._generation_semaphore.acquire()
+
+        # 使用默认值或限制最大分辨率
         if width is None:
             width = ScheduleImageGenerator.DEFAULT_WIDTH
         else:
@@ -602,6 +610,9 @@ class ScheduleImageGenerator:
         rgb_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
         img_bytes = img_byte_arr.getvalue()
         img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+
+        # P2优化：释放信号量
+        cls._generation_semaphore.release()
 
         return str(ScheduleImageGenerator.SCHEDULE_IMAGE_PATH), img_base64
 

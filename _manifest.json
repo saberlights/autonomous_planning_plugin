@@ -1,32 +1,144 @@
 {
   "manifest_version": 1,
   "name": "麦麦自主规划插件",
-  "version": "2.1.0",
-  "description": "让麦麦具备自主规划和执行目标的能力，通过LLM智能生成真实的人类日常生活日程",
+  "version": "2.2.0",
+  "description": "让麦麦具备自主规划能力，通过LLM智能生成符合人设的日常生活日程，支持定时生成和对话注入。",
   "author": {
-    "name": "MaiBot Community",
-    "url": "https://github.com/maibot/maibot"
+    "name": "靓仔",
+    "url": "https://github.com/xuqian13"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0",
+  "homepage_url": "",
+  "repository_url": "https://github.com/xuqian13/autonomous_planning_plugin",
+  "keywords": [
+    "自主规划",
+    "日程管理",
+    "目标管理",
+    "LLM",
+    "AI Agent",
+    "定时任务",
+    "人设",
+    "生活模拟",
+    "MaiCore"
+  ],
+  "categories": [
+    "AI",
+    "自动化",
+    "智能体",
+    "聊天增强",
+    "Utility"
+  ],
   "host_application": {
     "min_version": "0.11.0",
     "max_version": "1.0.0"
   },
-  "keywords": [
-    "autonomous",
-    "planning",
-    "goals",
-    "ai-agent",
-    "schedule",
-    "llm"
-  ],
-  "categories": [
-    "ai",
-    "automation",
-    "intelligence"
-  ],
-  "dependencies": {
-    "python": [],
-    "plugins": []
-  }
+  "default_locale": "zh-CN",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "general",
+    "components": [
+      {
+        "type": "tool",
+        "name": "manage_goal",
+        "description": "目标管理工具，支持创建、查看、更新、暂停、恢复、完成、取消、删除目标"
+      },
+      {
+        "type": "tool",
+        "name": "generate_schedule",
+        "description": "日程生成工具，自动生成每日/每周/每月计划"
+      },
+      {
+        "type": "tool",
+        "name": "get_planning_status",
+        "description": "规划状态查询工具，查看活跃目标和执行历史"
+      },
+      {
+        "type": "tool",
+        "name": "apply_schedule",
+        "description": "日程应用工具，将日程项转换为可执行目标"
+      },
+      {
+        "type": "command",
+        "name": "planning_command",
+        "description": "规划管理命令，支持/plan status、/plan list、/plan clear、/plan delete等"
+      },
+      {
+        "type": "event_handler",
+        "name": "autonomous_planner",
+        "description": "自主规划事件处理器，定期清理过期目标"
+      },
+      {
+        "type": "event_handler",
+        "name": "schedule_inject_handler",
+        "description": "日程注入事件处理器，在LLM调用前注入当前日程信息"
+      }
+    ],
+    "features": [
+      "基于Bot人设智能生成每日日程（8-15个活动）",
+      "定时自动生成（默认每天00:30）",
+      "对话中自然提到当前活动（如\"这会儿正吃午饭呢\"）",
+      "支持文字和图片两种日程展示格式",
+      "多轮生成机制，可选启用提升质量",
+      "LRU缓存优化，减少重复计算",
+      "批量保存和延迟保存，减少I/O操作",
+      "自动清理过期目标（默认保留30天）",
+      "时区支持（默认Asia/Shanghai）",
+      "智能注入判断，仅在涉及时间的对话中注入"
+    ],
+    "dependencies": {
+      "python": ["pillow"],
+      "system": [],
+      "plugins": []
+    }
+  },
+  "configuration": {
+    "config_file": "config.toml",
+    "auto_generate": true,
+    "sections": [
+      {
+        "name": "plugin",
+        "description": "插件基本配置（启用开关）"
+      },
+      {
+        "name": "autonomous_planning",
+        "description": "自主规划配置（清理间隔、保留天数）"
+      },
+      {
+        "name": "autonomous_planning.schedule",
+        "description": "日程生成配置（注入开关、生成参数、定时配置、缓存配置）"
+      }
+    ]
+  },
+  "usage_examples": [
+    {
+      "type": "conversation",
+      "description": "自动生成日程",
+      "example": "用户：帮我生成今天的日程\n机器人：[LLM基于人设生成8-15个活动并保存]"
+    },
+    {
+      "type": "command",
+      "description": "查看日程（文字格式）",
+      "example": "/plan status"
+    },
+    {
+      "type": "command",
+      "description": "查看日程（图片格式）",
+      "example": "/plan list"
+    },
+    {
+      "type": "command",
+      "description": "清理旧日程",
+      "example": "/plan clear"
+    },
+    {
+      "type": "command",
+      "description": "删除指定日程",
+      "example": "/plan delete 1"
+    },
+    {
+      "type": "inject",
+      "description": "对话中自然提到当前活动",
+      "example": "用户：在干嘛？\n机器人：这会儿正吃午饭呢~"
+    }
+  ]
 }
