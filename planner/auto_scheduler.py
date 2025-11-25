@@ -212,6 +212,11 @@ class ScheduleAutoScheduler:
                 use_multi_round=self.plugin.get_config("autonomous_planning.schedule.use_multi_round", True)
             )
 
+            # 🔧 修复：如果日程已存在，跳过应用
+            if schedule.metadata and schedule.metadata.get("existing"):
+                self.logger.info(f"📅 今天已有日程（{len(schedule.items)}个活动），跳过应用")
+                return
+
             # 应用日程
             created_ids = await schedule_generator.apply_schedule(
                 schedule=schedule,

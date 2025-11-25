@@ -147,6 +147,58 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         self._generate_lock = asyncio.Lock()
         self._last_schedule_check_date = None
 
+        # 🆕 智能注入组件初始化
+        try:
+            from .inject import (
+                IntentClassifier,
+                ContentTemplateEngine,
+                InjectOptimizer,
+                ActivityStateAnalyzer,
+                ActivityState,  # 提前导入，避免在execute中导入
+            )
+
+            # 读取智能注入配置
+            enable_intent_classification = self.get_config(
+                "autonomous_planning.schedule.inject.enable_intent_classification", True
+            )
+            enable_state_analysis = self.get_config(
+                "autonomous_planning.schedule.inject.enable_state_analysis", True
+            )
+            enable_inject_optimization = self.get_config(
+                "autonomous_planning.schedule.inject.enable_inject_optimization", True
+            )
+            casual_inject_prob = self.get_config(
+                "autonomous_planning.schedule.inject.casual_chat_inject_probability", 0.5
+            )
+
+            # 初始化智能组件
+            self.intent_classifier = IntentClassifier() if enable_intent_classification else None
+            self.state_analyzer = ActivityStateAnalyzer() if enable_state_analysis else None
+            self.content_engine = ContentTemplateEngine(
+                self.state_analyzer
+            ) if enable_state_analysis else None
+            self.inject_optimizer = InjectOptimizer(
+                cache_ttl=self._schedule_cache_ttl,
+                casual_inject_probability=casual_inject_prob
+            ) if enable_inject_optimization else None
+
+            # 保存 ActivityState 类引用，供 execute 使用
+            self.ActivityState = ActivityState
+
+            logger.info(
+                f"✅ 智能日程注入组件已加载 "
+                f"(意图分类: {enable_intent_classification}, "
+                f"状态分析: {enable_state_analysis}, "
+                f"注入优化: {enable_inject_optimization})"
+            )
+        except ImportError as e:
+            logger.warning(f"智能注入组件加载失败，使用传统模式: {e}")
+            self.intent_classifier = None
+            self.state_analyzer = None
+            self.content_engine = None
+            self.inject_optimizer = None
+            self.ActivityState = None
+
         if self.enabled and self.inject_schedule:
             logger.info(f"日程注入功能已启用（缓存TTL: {self._schedule_cache_ttl}秒，最大{cache_max_size}项）")
             if self.auto_generate_schedule:
@@ -278,6 +330,11 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             use_llm=True
         )
 
+        # 🔧 修复：如果日程已存在（metadata中标记existing=True），跳过应用
+        if schedule.metadata and schedule.metadata.get("existing"):
+            logger.info(f"📅 今天已有日程（{len(schedule.items)}个活动），跳过应用")
+            return True
+
         # 应用日程
         created_ids = await schedule_generator.apply_schedule(
             schedule=schedule,
@@ -289,7 +346,8 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             logger.info(f"✅ 自动生成日程成功，创建了 {len(created_ids)} 个目标")
             # 清理缓存，强制重新加载
             self._schedule_cache.clear()
-            self._last_schedule_check_date = datetime.now().strftime("%Y-%m-%d")
+            # 🔧 修复：统一使用时区感知时间
+            self._last_schedule_check_date = self._get_timezone_now().strftime("%Y-%m-%d")
             return True
         else:
             logger.warning("⚠️ 日程生成失败，没有创建任何目标")
@@ -300,10 +358,13 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         """
         智能判断是否需要注入日程信息
 
-        判断规则：
-        1. 用户消息包含时间相关关键词 → 需要注入
-        2. 短消息（<5字）且包含问号 → 可能是询问，需要注入
-        3. 其他情况 → 不注入
+        🆕 智能化版本：
+        - 使用意图分类器识别用户意图
+        - 技术问答/命令执行场景自动跳过
+        - 其他意图交由InjectOptimizer进一步判断
+
+        向后兼容：
+        - 如果智能组件未加载，回退到关键词匹配模式
 
         Args:
             message: 消息对象
@@ -311,22 +372,30 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         Returns:
             是否需要注入日程
         """
-        # 获取用户消息文本
-        user_message = ""
-
-        # 方式1: 从plain_text提取（MaiMessages标准属性）
-        if hasattr(message, 'plain_text') and message.plain_text:
-            user_message = str(message.plain_text)
-            logger.debug(f"从plain_text提取到用户消息: '{user_message}'")
-
-        # 方式2: 从raw_message提取（备选）
-        if not user_message and hasattr(message, 'raw_message') and message.raw_message:
-            user_message = str(message.raw_message)
-            logger.debug(f"从raw_message提取到用户消息: '{user_message}'")
-
+        # 提取用户消息文本
+        user_message = self._extract_user_message(message)
         if not user_message:
-            logger.debug(f"未能提取到用户消息，跳过日程注入")
+            logger.debug("未能提取到用户消息，跳过日程注入")
             return False
+
+        # 🆕 使用智能意图分类（如果可用）
+        if self.intent_classifier:
+            intent, confidence = self.intent_classifier.classify(user_message)
+
+            # 技术问答/命令执行 → 直接跳过
+            if intent.value in ["tech_question", "command"]:
+                logger.debug(f"检测到{intent.value}意图，跳过注入")
+                return False
+
+            # 其他意图 → 允许注入（由InjectOptimizer进一步判断）
+            logger.debug(
+                f"意图分类: {intent.value} (置信度: {confidence:.2f}), "
+                f"允许注入（后续由optimizer判断）"
+            )
+            return True
+
+        # 向后兼容：使用传统关键词匹配
+        logger.debug("智能组件未加载，使用传统关键词匹配")
 
         # P1优化：使用预编译正则一次匹配所有关键词
         match = self._TIME_KEYWORDS_PATTERN.search(user_message)
@@ -335,7 +404,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             return True
 
         # 规则2：短消息 + 问号（可能是询问）
-        if len(user_message) < 5 and "?" in user_message:
+        if len(user_message) < 5 and ("?" in user_message or "？" in user_message):
             logger.info("检测到短消息问句，将注入日程")
             return True
 
@@ -343,10 +412,78 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         logger.debug("用户消息不涉及时间，跳过日程注入")
         return False
 
+    def _extract_user_message(self, message: MaiMessages) -> str:
+        """提取用户消息文本
+
+        Args:
+            message: 消息对象
+
+        Returns:
+            用户消息文本，如果提取失败则返回空字符串
+        """
+        user_message = ""
+
+        # 🔧 优先级1: 从message_base_info提取原始消息
+        if hasattr(message, 'message_base_info') and message.message_base_info:
+            # 尝试多个可能的字段
+            user_message = (
+                message.message_base_info.get('message') or
+                message.message_base_info.get('original_message') or
+                message.message_base_info.get('content') or
+                ""
+            )
+            if user_message:
+                logger.debug(f"从message_base_info提取到用户消息: '{str(user_message)[:50]}...'")
+                return str(user_message)
+
+        # 🔧 优先级2: 从raw_message提取（可能更原始）
+        if hasattr(message, 'raw_message') and message.raw_message:
+            # raw_message可能更接近原始消息
+            raw = str(message.raw_message)
+            # 如果raw_message不包含聊天记录标记，则使用它
+            if '群里正在进行的聊天内容' not in raw and len(raw) < 200:
+                logger.debug(f"从raw_message提取到用户消息: '{raw[:50]}...'")
+                return raw
+
+        # 🔧 优先级3: 从plain_text提取（但可能包含聊天记录）
+        if hasattr(message, 'plain_text') and message.plain_text:
+            plain = str(message.plain_text)
+            # 如果plain_text很短且不包含聊天记录，则使用
+            if '群里正在进行的聊天内容' not in plain and len(plain) < 200:
+                logger.debug(f"从plain_text提取到用户消息: '{plain[:50]}...'")
+                return plain
+
+        logger.warning("未能提取到有效的用户消息")
+        return ""
+
+    def _get_user_id(self, message: MaiMessages) -> str:
+        """获取用户ID
+
+        Args:
+            message: 消息对象
+
+        Returns:
+            用户ID，如果获取失败则返回'unknown'
+        """
+        if hasattr(message, 'message_base_info') and message.message_base_info:
+            return str(message.message_base_info.get('user_id', 'unknown'))
+        return 'unknown'
+
     async def execute(
         self, message: MaiMessages | None
     ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        """执行日程注入（智能判断是否需要）"""
+        """执行日程注入（智能版）
+
+        🆕 智能化改进：
+        1. 使用意图分类器识别用户意图
+        2. 使用状态分析器生成情感化描述
+        3. 使用内容模板引擎动态生成注入内容
+        4. 使用注入优化器防止无效注入
+
+        向后兼容：
+        - 所有智能组件都是可选的
+        - 如果组件未加载，回退到传统模式
+        """
         if not self.enabled or not self.inject_schedule or not message or not message.llm_prompt:
             return True, True, None, None, None
 
@@ -361,7 +498,8 @@ class ScheduleInjectEventHandler(BaseEventHandler):
 
             # P0修复：检查今天是否有日程，没有则自动生成（原子化操作）
             if self.auto_generate_schedule:
-                today_str = datetime.now().strftime("%Y-%m-%d")
+                # 🔧 修复：统一使用 _get_timezone_now() 处理时区
+                today_str = self._get_timezone_now().strftime("%Y-%m-%d")
 
                 # 使用锁确保检查+生成的原子性，防止竞态条件
                 async with self._generate_lock:
@@ -413,26 +551,110 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                         # 更新检查日期（无论是否生成成功）
                         self._last_schedule_check_date = today_str
 
-            # 获取当前日程
-            current_activity, current_description, next_activity, next_time = self._get_current_schedule(chat_id)
+            # 获取当前日程（现在返回所有未来活动列表）
+            current_activity, current_description, all_future_activities, activity_type = self._get_current_schedule(chat_id)
 
-            # 构建日程提示
-            schedule_prompt = ""
-            if current_activity:
-                schedule_prompt = f"\n【当前状态】\n这会儿正{current_activity}"
-                if current_description:
-                    schedule_prompt += f"（{current_description}）"
-                schedule_prompt += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
-                if next_activity and next_time:
-                    schedule_prompt += f"\n等下{next_time}要{next_activity}。"
-                schedule_prompt += "\n"
+            # 🆕 使用智能组件生成注入内容
+            inject_content = None
+
+            if self.intent_classifier and self.content_engine and self.inject_optimizer:
+                # 智能模式
+                user_message = self._extract_user_message(message)
+                user_id = self._get_user_id(message)
+                intent, confidence = self.intent_classifier.classify(user_message)
+
+                # 🆕 提取用户询问的时间段
+                time_range = self.intent_classifier.extract_time_range(user_message)
+
+                # 🆕 如果识别到时间段，根据时间段过滤活动列表
+                filtered_activities = all_future_activities
+                if time_range and all_future_activities:
+                    filtered_activities = []
+                    for time_str, activity_name in all_future_activities:
+                        # 解析活动时间 "HH:MM"
+                        try:
+                            hour = int(time_str.split(':')[0].split('-')[0])  # 处理"14:00-16:00"格式
+                            # 检查活动时间是否在询问的时间段内
+                            if time_range.start_hour <= hour < time_range.end_hour:
+                                filtered_activities.append((time_str, activity_name))
+                        except (ValueError, IndexError):
+                            # 解析失败，保留该活动
+                            filtered_activities.append((time_str, activity_name))
+
+                    logger.debug(
+                        f"根据时间段'{time_range.name}'过滤活动: "
+                        f"{len(all_future_activities)} → {len(filtered_activities)}"
+                    )
+
+                # 使用InjectOptimizer判断是否注入
+                should_inject, skip_reason = self.inject_optimizer.should_inject(
+                    user_id, intent, current_activity, confidence
+                )
+
+                if not should_inject:
+                    logger.debug(f"InjectOptimizer决定跳过注入: {skip_reason}")
+                    return True, True, None, None, None
+
+                # 分析活动状态（如果有当前活动）
+                activity_state = None
+                state_desc = None
+
+                if current_activity and self.state_analyzer and self.ActivityState:
+                    # 获取当前时间和活动时间窗口
+                    # 🔧 修复：统一使用时区感知时间
+                    now = self._get_timezone_now()
+                    current_minutes = now.hour * 60 + now.minute
+
+                    # 🆕 使用真实活动类型，如果没有则回退到 "custom"
+                    # activity_type 可能是: study, meal, entertainment, daily_routine, exercise, social_maintenance, learn_topic, custom
+                    real_activity_type = activity_type if activity_type else "custom"
+
+                    # 简化版：直接使用活动类型生成情感描述
+                    # 假设活动刚开始（这里可以根据实际时间窗口计算）
+                    activity_state = self.ActivityState.IN_PROGRESS
+                    state_desc = self.state_analyzer.generate_emotion_text(
+                        real_activity_type, activity_state
+                    )
+
+                # 使用ContentTemplateEngine生成注入内容
+                inject_content = self.content_engine.build_inject_content(
+                    intent=intent,
+                    current_activity=current_activity,
+                    current_description=current_description,
+                    activity_state=activity_state,
+                    state_desc=state_desc or current_description,
+                    next_activities=filtered_activities  # 🆕 使用过滤后的活动列表
+                )
+
+                # 记录注入历史
+                if inject_content:
+                    self.inject_optimizer.record_injection(
+                        user_id, current_activity or "无", inject_content, intent  # 🆕 传入意图
+                    )
+                    logger.info(
+                        f"✅ 智能注入: intent={intent.value}, "
+                        f"confidence={confidence:.2f}, content={inject_content[:50]}..."
+                    )
+            else:
+                # 传统模式（向后兼容）
+                if current_activity:
+                    inject_content = f"【当前状态】\n这会儿正{current_activity}"
+                    if current_description:
+                        inject_content += f"（{current_description}）"
+                    inject_content += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
+                    # 🆕 使用所有未来活动列表
+                    if all_future_activities:
+                        # 传统模式只显示第一个活动（向后兼容）
+                        next_time, next_activity = all_future_activities[0]
+                        inject_content += f"\n等下{next_time}要{next_activity}。"
+                    inject_content += "\n"
+                    logger.info(f"✅ 传统注入: {current_activity}")
 
             # 注入日程信息到prompt
-            if schedule_prompt:
+            if inject_content:
                 original_prompt = str(message.llm_prompt)
-                new_prompt = schedule_prompt + "\n" + original_prompt
+                new_prompt = inject_content + "\n" + original_prompt
                 message.modify_llm_prompt(new_prompt, suppress_warning=True)
-                logger.info(f"✅ 已注入日程状态: {current_activity}")
 
             return True, True, None, None, message
 
@@ -458,7 +680,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             if expired_keys:
                 logger.debug(f"清理了 {len(expired_keys)} 个过期缓存项")
 
-    def _get_current_schedule(self, chat_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def _get_current_schedule(self, chat_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], List[Tuple[str, str]], Optional[str]]:
         """
         获取当前日程信息（带优化缓存）
 
@@ -468,12 +690,14 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         3. 定期清理过期缓存，避免内存泄漏
 
         Returns:
-            (当前活动, 活动描述, 下一个活动, 下一个活动时间)
+            (当前活动, 活动描述, 所有未来活动列表, 当前活动类型)
+            其中未来活动列表格式: [(时间, 活动名), ...]
         """
         import time
 
         # 获取当前时间
-        now = datetime.now()
+        # 🔧 修复：统一使用时区感知时间
+        now = self._get_timezone_now()
         current_hour = now.hour
         current_minute = now.minute
         current_time = time.time()
@@ -507,7 +731,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 goals = goal_manager.get_active_goals(chat_id=chat_id)
 
             if not goals:
-                result = (None, None, None, None)
+                result = (None, None, [], None)
                 self._schedule_cache[cache_key] = (result, current_time)
                 return result
 
@@ -537,7 +761,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                     scheduled_goals.append((goal, time_window, is_today))
 
             if not scheduled_goals:
-                result = (None, None, None, None)
+                result = (None, None, [], None)
                 self._schedule_cache[cache_key] = (result, current_time)
                 return result
 
@@ -558,6 +782,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             # 查找当前活动（仅选择今天创建的任务）
             current_activity = None
             current_description = None
+            current_activity_type = None  # 🆕 新增：活动类型
             current_goal_created_at = None
 
             for goal, time_window, is_today in scheduled_goals:
@@ -583,11 +808,11 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                         if current_activity is None or (goal.created_at and goal.created_at > current_goal_created_at):
                             current_activity = goal.name
                             current_description = goal.description
+                            current_activity_type = goal.goal_type  # 🆕 获取真实活动类型
                             current_goal_created_at = goal.created_at
 
-            # 查找下一个活动（优先选择今天的任务）
-            next_activity = None
-            next_time = None
+            # 🆕 收集所有未来活动（优先选择今天的任务）
+            all_future_activities = []
             for goal, time_window, is_today in scheduled_goals:
                 start_val = time_window[0] if len(time_window) > 0 else 0
                 end_val = time_window[1] if len(time_window) > 1 else start_val + 60
@@ -599,23 +824,25 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                     start_minutes = start_val
 
                 if start_minutes > current_time_minutes:
-                    # 优先选择今天的任务
-                    if next_activity is None or is_today:
-                        next_activity = goal.name
-                        # 转换为时:分格式
-                        hour = start_minutes // 60
-                        minute = start_minutes % 60
-                        next_time = f"{hour:02d}:{minute:02d}"
-                        if is_today:
-                            break  # 找到今天的任务就停止
+                    # 转换为时:分格式
+                    hour = start_minutes // 60
+                    minute = start_minutes % 60
+                    time_str = f"{hour:02d}:{minute:02d}"
 
-            result = (current_activity, current_description, next_activity, next_time)
+                    # 添加到列表（今天的任务排在前面）
+                    if is_today:
+                        all_future_activities.append((time_str, goal.name))
+                    else:
+                        # 非今天的任务添加到末尾
+                        all_future_activities.append((time_str, goal.name))
+
+            result = (current_activity, current_description, all_future_activities, current_activity_type)
             self._schedule_cache[cache_key] = (result, current_time)
             return result
 
         except Exception as e:
             logger.debug(f"获取日程信息失败: {e}")
-            result = (None, None, None, None)
+            result = (None, None, [], None)
             self._schedule_cache[cache_key] = (result, current_time)
             return result
 

@@ -2,7 +2,7 @@
 
 让 AI Bot 拥有自己的生活日程，自动生成符合人设的每日活动安排。
 
-**版本：v3.1.0** | [GitHub](https://github.com/xuqian13/autonomous_planning_plugin) | 许可证：AGPL-3.0
+**版本：v3.2.0** | [GitHub](https://github.com/xuqian13/autonomous_planning_plugin) | 许可证：AGPL-3.0
 
 ---
 
@@ -11,7 +11,11 @@
 ### 核心功能
 - 🤖 **智能生成日程** - 基于Bot人设自动生成每日计划（8-15个活动）
 - ⏰ **定时自动生成** - 每天凌晨自动生成新日程
-- 💬 **对话融入** - 自然提到当前活动（如"这会儿正吃午饭呢"）
+- 💬 **智能日程注入** - 根据对话场景智能注入当前活动（v3.2.0新增）
+  - 🧠 意图识别：自动识别时间查询、闲聊、技术问答等场景
+  - 🎭 情感化描述：根据活动状态生成自然的对话内容
+  - ⏱️ 时间段过滤：支持"上午"、"下午"等时间段查询
+  - 🎯 智能优化：防止重复注入，概率化闲聊注入
 - 📊 **多种格式** - 文字或图片查看日程
 - 🎨 **自定义风格** - 配置提示词控制日程内容
 - 🧹 **自动清理** - 自动清理过期日程，保持数据库整洁
@@ -109,6 +113,33 @@ custom_prompt = "今天想多运动，至少3小时运动时间"
 | `auto_schedule_time` | "00:30" | 定时生成时间 |
 | `admin_users` | [] | 管理员QQ号列表 |
 
+### 智能注入配置（v3.2.0新增）⭐
+
+在 `config.toml` 中配置智能注入功能：
+
+```toml
+[autonomous_planning.schedule.inject]
+# 智能组件开关
+enable_intent_classification = true  # 启用意图分类器
+enable_state_analysis = true         # 启用状态分析器
+enable_inject_optimization = true    # 启用注入优化器
+
+# 注入策略配置
+casual_chat_inject_probability = 0.5 # 闲聊时注入概率（0-1）
+inject_history_ttl = 300             # 注入历史缓存时间（秒）
+max_future_activities = 3            # 最多显示未来活动数量
+
+# 调试选项
+debug_show_intent = true             # 日志中显示检测到的意图
+```
+
+#### 智能注入功能说明
+
+- **意图分类**：自动识别用户意图（时间查询/闲聊/技术问答/命令执行），在技术问答等场景自动跳过注入
+- **状态分析**：根据活动类型和进度生成情感化描述（如"正在认真学习中"、"悠闲地享用午餐"）
+- **注入优化**：防止短时间内重复注入相同内容，闲聊时概率注入
+- **时间段过滤**：用户询问"上午/下午有什么安排"时，自动过滤对应时间段的活动
+
 ---
 
 ## 项目结构
@@ -163,7 +194,13 @@ autonomous_planning_plugin/
 │
 ├── handlers/                # 事件处理器模块
 │   ├── __init__.py
-│   └── handlers.py          # 事件监听和日程注入
+│   ├── handlers.py          # 事件监听和日程注入
+│   └── inject/              # 智能注入子模块 ⭐ v3.2.0
+│       ├── __init__.py
+│       ├── intent_classifier.py    # 意图分类器（308行）
+│       ├── state_analyzer.py       # 状态分析器（350行）
+│       ├── content_template.py     # 内容模板引擎（272行）
+│       └── inject_optimizer.py     # 注入优化器（277行）
 │
 ├── utils/                   # 工具模块
 │   ├── time_utils.py        # 时间处理工具
@@ -215,6 +252,11 @@ autonomous_planning_plugin/
 - **handlers.py** - 2 个事件处理器
   - AutonomousPlannerEventHandler: 后台清理任务
   - ScheduleInjectEventHandler: 对话中注入当前活动
+- **inject/** - 智能注入子模块 ⭐ v3.2.0
+  - intent_classifier.py: 意图分类器（识别时间查询/闲聊/技术问答等）
+  - state_analyzer.py: 活动状态分析器（生成情感化描述）
+  - content_template.py: 动态内容模板引擎
+  - inject_optimizer.py: 注入时机优化器（防重复/概率注入）
 
 #### 🛠️ utils/ - 辅助工具
 - **time_utils.py** - 时间格式转换、解析
@@ -458,6 +500,64 @@ admin_users = ["你的QQ号"]  # 或设为空列表 [] 允许所有人
 ---
 
 ## 版本历史
+
+### v3.2.0 (2025-11-25)
+
+**智能日程注入系统** 🧠
+
+**新增功能** ✨
+- 🎯 **智能意图识别** - 自动识别用户意图，避免不相关场景注入
+  - 支持时间查询、闲聊、技术问答、命令执行等意图分类
+  - 技术问答/命令执行场景自动跳过注入
+  - 基于关键词和规则匹配（可扩展为LLM）
+- 🎭 **情感化描述生成** - 根据活动类型和状态生成自然语言
+  - 活动状态机：未开始/进行中/即将结束
+  - 9种活动类型情感模板（学习/用餐/娱乐等）
+  - 动态内容模板引擎
+- ⏱️ **时间段过滤** - 支持"上午/下午/晚上"等时间段查询
+  - 自动识别用户询问的时间范围
+  - 根据时间段过滤活动列表
+- 🎲 **智能注入优化** - 防止无效和重复注入
+  - LRU缓存注入历史（防5分钟内重复）
+  - 闲聊场景概率注入（可配置0-1）
+  - 相同活动去重判断
+
+**核心改进** 🔧
+- 新增 `handlers/inject/` 模块（1235行代码）
+  - intent_classifier.py: 意图分类器（308行）
+  - state_analyzer.py: 状态分析器（350行）
+  - content_template.py: 内容模板引擎（272行）
+  - inject_optimizer.py: 注入优化器（277行）
+- 优化 ScheduleInjectEventHandler 注入逻辑
+  - 支持智能模式和传统模式（向后兼容）
+  - 改进消息提取逻辑（避免聊天记录干扰）
+  - 统一使用时区感知时间处理
+
+**Bug修复** 🐛
+- ✅ 修复已有日程时重复应用的问题
+  - handlers.py:335, auto_scheduler.py:215, tools.py:585
+  - 检查 schedule.metadata 中的 existing 标记
+- ✅ 修复优先级枚举处理bug
+  - schedule_generator.py:151, 369
+  - 自动转换枚举对象为 .value 字符串
+- ✅ 统一时区处理逻辑
+  - 全局使用 _get_timezone_now() 方法
+- ✅ 优化日程摘要格式
+  - 显示时间范围（如"14:00-16:00 学习Python"）
+  - 简化返回信息，更清晰易读
+
+**配置变更** ⚙️
+- 新增 `[autonomous_planning.schedule.inject]` 配置段
+  - enable_intent_classification: 意图识别开关
+  - enable_state_analysis: 状态分析开关
+  - enable_inject_optimization: 注入优化开关
+  - casual_chat_inject_probability: 闲聊注入概率
+  - debug_show_intent: 调试选项
+
+**向后兼容** ✅
+- 所有智能组件都是可选的
+- 组件加载失败时自动回退到传统模式
+- 不影响现有用户使用
 
 ### v3.1.0 (2025-11-25)
 

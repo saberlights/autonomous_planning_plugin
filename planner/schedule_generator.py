@@ -148,11 +148,14 @@ class ScheduleGenerator:
                         minutes = time_window[0] % 60
                         time_slot = f"{hours:02d}:{minutes:02d}"
 
+                    # 🔧 修复：如果priority是枚举对象，转换为字符串
+                    priority_str = goal.priority.value if hasattr(goal.priority, 'value') else goal.priority
+
                     schedule_items.append(ScheduleItem(
                         name=goal.name,
                         description=goal.description,
                         goal_type=goal.goal_type,
-                        priority=goal.priority,
+                        priority=priority_str,
                         time_slot=time_slot,
                         duration_hours=duration
                     ))
@@ -363,13 +366,16 @@ class ScheduleGenerator:
                     parameters["time_window"] = [start_minutes, end_minutes]
 
                 # 准备目标数据
+                # 🔧 修复：如果priority是枚举对象，转换为字符串
+                priority_str = item.priority.value if hasattr(item.priority, 'value') else item.priority
+
                 goals_data.append({
                     "name": item.name,
                     "description": item.description,
                     "goal_type": item.goal_type,
                     "creator_id": user_id,
                     "chat_id": chat_id,
-                    "priority": item.priority,
+                    "priority": priority_str,
                     "conditions": {},
                     "parameters": parameters,
                 })
@@ -388,20 +394,28 @@ class ScheduleGenerator:
             return []
 
     def get_schedule_summary(self, schedule: Schedule) -> str:
-        """获取日程摘要"""
-        lines = [
-            f"📅 {schedule.name}",
-            f"类型: {schedule.schedule_type.value}",
-            f"任务数: {len(schedule.items)}",
-            ""
-        ]
+        """获取日程摘要（简洁版 - 显示时间范围）"""
+        lines = [f"📅 {schedule.name}"]
 
-        for i, item in enumerate(schedule.items, 1):
-            time_info = f" @ {item.time_slot}" if item.time_slot else ""
-            duration_info = f" (持续{item.duration_hours}小时)" if item.duration_hours else ""
-            lines.append(f"{i}. {item.name}{time_info}{duration_info}")
-            lines.append(f"   {item.description}")
-            lines.append("")
+        for item in schedule.items:
+            if item.time_slot:
+                # 计算结束时间
+                time_parts = item.time_slot.split(":")
+                start_hour = int(time_parts[0])
+                start_minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+
+                # 使用 duration_hours 计算结束时间
+                if item.duration_hours:
+                    total_minutes = start_hour * 60 + start_minute + int(item.duration_hours * 60)
+                    end_hour = total_minutes // 60
+                    end_minute = total_minutes % 60
+                    time_range = f"{start_hour:02d}:{start_minute:02d}-{end_hour:02d}:{end_minute:02d}"
+                else:
+                    time_range = item.time_slot
+
+                lines.append(f"{time_range} {item.name}")
+            else:
+                lines.append(item.name)
 
         return "\n".join(lines)
 

@@ -404,12 +404,26 @@ class GetPlanningStatusTool(BaseTool):
             goal_manager = get_goal_manager()
             detailed = function_args.get("detailed", False)
 
-            # 获取所有目标
-            all_goals = goal_manager.get_all_goals(chat_id="global")
+            # 🔧 修复：使用统一的 get_schedule_goals() 方法（包含日期过滤）
+            schedule_goals = goal_manager.get_schedule_goals(chat_id="global")
 
-            # 筛选出日程类型的目标（带 time_window）
-            schedule_goals = []
-            for goal in all_goals:
+            if not schedule_goals:
+                return {"type": "planning_status", "content": "📅 今天还没有日程"}
+
+            # 获取时区感知的当前时间
+            try:
+                timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+                import pytz
+                tz = pytz.timezone(timezone_str)
+                now = datetime.now(tz)
+            except (ImportError, Exception):
+                now = datetime.now()
+
+            current_minutes = now.hour * 60 + now.minute
+
+            # 提取时间窗口并排序
+            schedule_with_time = []
+            for goal in schedule_goals:
                 time_window = None
                 if goal.parameters and "time_window" in goal.parameters:
                     time_window = goal.parameters["time_window"]
@@ -417,24 +431,17 @@ class GetPlanningStatusTool(BaseTool):
                     time_window = goal.conditions["time_window"]
 
                 if time_window and isinstance(time_window, list) and len(time_window) == 2:
-                    schedule_goals.append((goal, time_window))
-
-            if not schedule_goals:
-                return {"type": "planning_status", "content": "📅 今天还没有日程"}
+                    schedule_with_time.append((goal, time_window))
 
             # 按时间排序
-            schedule_goals.sort(key=lambda x: x[1][0])
-
-            # 获取当前时间（分钟数）
-            now = datetime.now()
-            current_minutes = now.hour * 60 + now.minute
+            schedule_with_time.sort(key=lambda x: x[1][0])
 
             # 分类日程
             ongoing = []  # 正在进行
             upcoming = []  # 即将到来
             completed = []  # 已完成
 
-            for goal, time_window in schedule_goals:
+            for goal, time_window in schedule_with_time:
                 start_min, end_min = time_window
 
                 if start_min <= current_minutes <= end_min:
@@ -575,12 +582,24 @@ class GenerateScheduleTool(BaseTool):
 
             # 自动应用日程
             if auto_apply:
-                created_ids = await schedule_generator.apply_schedule(
-                    schedule=schedule,
-                    user_id=user_id,
-                    chat_id=chat_id
-                )
-                summary += f"\n\n✅ 日程已应用为全局目标，创建了 {len(created_ids)} 个目标（所有聊天共享）"
+                # 🔧 修复：如果日程已存在，跳过应用
+                if schedule.metadata and schedule.metadata.get("existing"):
+                    # 简洁返回，明确表达"今天已经有日程了"
+                    return {
+                        "type": "schedule_generated",
+                        "content": f"✅ 今天的日程已经安排好了，一共 {len(schedule.items)} 个活动"
+                    }
+                else:
+                    created_ids = await schedule_generator.apply_schedule(
+                        schedule=schedule,
+                        user_id=user_id,
+                        chat_id=chat_id
+                    )
+                    # 简洁返回，不包含详细日程列表
+                    return {
+                        "type": "schedule_generated",
+                        "content": f"✅ 日程生成完成！今天一共安排了 {len(created_ids)} 个活动"
+                    }
 
             return {"type": "schedule_generated", "content": summary}
 
