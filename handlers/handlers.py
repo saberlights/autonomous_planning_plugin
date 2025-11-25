@@ -155,9 +155,13 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 InjectOptimizer,
                 ActivityStateAnalyzer,
                 ActivityState,  # 提前导入，避免在execute中导入
+                ConversationContextCache,  # v1.1.0新增
             )
 
             # 读取智能注入配置
+            inject_mode = self.get_config(
+                "autonomous_planning.schedule.inject.inject_mode", "smart"
+            )
             enable_intent_classification = self.get_config(
                 "autonomous_planning.schedule.inject.enable_intent_classification", True
             )
@@ -170,6 +174,15 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             casual_inject_prob = self.get_config(
                 "autonomous_planning.schedule.inject.casual_chat_inject_probability", 0.5
             )
+            context_max_turns = self.get_config(
+                "autonomous_planning.schedule.inject.context_max_turns", 3
+            )
+            context_ttl = self.get_config(
+                "autonomous_planning.schedule.inject.context_ttl", 600
+            )
+
+            # 保存配置
+            self.inject_mode = inject_mode
 
             # 初始化智能组件
             self.intent_classifier = IntentClassifier() if enable_intent_classification else None
@@ -182,21 +195,31 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 casual_inject_probability=casual_inject_prob
             ) if enable_inject_optimization else None
 
+            # 🆕 v1.1.0: 初始化对话上下文缓存
+            self.context_cache = ConversationContextCache(
+                max_turns=context_max_turns,
+                ttl=context_ttl
+            )
+
             # 保存 ActivityState 类引用，供 execute 使用
             self.ActivityState = ActivityState
 
             logger.info(
                 f"✅ 智能日程注入组件已加载 "
-                f"(意图分类: {enable_intent_classification}, "
+                f"(模式: {inject_mode}, "
+                f"意图分类: {enable_intent_classification}, "
                 f"状态分析: {enable_state_analysis}, "
-                f"注入优化: {enable_inject_optimization})"
+                f"注入优化: {enable_inject_optimization}, "
+                f"对话上下文: {context_max_turns}轮/{context_ttl}秒)"
             )
         except ImportError as e:
             logger.warning(f"智能注入组件加载失败，使用传统模式: {e}")
+            self.inject_mode = "traditional"
             self.intent_classifier = None
             self.state_analyzer = None
             self.content_engine = None
             self.inject_optimizer = None
+            self.context_cache = None
             self.ActivityState = None
 
         if self.enabled and self.inject_schedule:
@@ -469,20 +492,122 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             return str(message.message_base_info.get('user_id', 'unknown'))
         return 'unknown'
 
+    def _build_smart_inject_prompt(
+        self,
+        current_activity: str,
+        description: str,
+        future_activities: List[Tuple[str, str]],
+        user_message: str,
+        activity_type: Optional[str] = None
+    ) -> str:
+        """🆕 v1.1.0: 构建智能注入prompt - LLM自判断版本
+
+        核心设计：
+        1. 提供日程信息作为"可选上下文"
+        2. 根据用户消息类型给出使用指导
+        3. 让LLM自己决定是否使用、如何使用
+
+        Args:
+            current_activity: 当前活动名称
+            description: 活动描述
+            future_activities: 未来活动列表 [(时间, 活动名)]
+            user_message: 用户消息
+            activity_type: 活动类型（可选）
+
+        Returns:
+            注入的prompt内容
+        """
+        # 分析用户消息类型（轻量级预判，辅助LLM）
+        msg_lower = user_message.lower()
+
+        # 直接询问当前状态
+        is_direct_query = any(kw in msg_lower for kw in [
+            "在干嘛", "做什么", "忙吗", "在做", "正在",
+            "日程", "计划", "安排", "行程",
+            "现在", "当前", "这会儿"
+        ])
+
+        # 询问未来计划
+        is_future_query = any(kw in msg_lower for kw in [
+            "接下来", "等下", "稍后", "之后", "待会",
+            "明天", "今晚", "晚上", "下午", "上午"
+        ])
+
+        # 问候语
+        is_greeting = any(kw in msg_lower for kw in [
+            "早上好", "晚上好", "早安", "晚安",
+            "你好", "hi", "hello", "嗨"
+        ])
+
+        # 技术问题
+        is_tech_question = any(kw in msg_lower for kw in [
+            "怎么", "如何", "为什么", "什么是",
+            "报错", "错误", "bug", "异常",
+            "代码", "配置", "安装", "调试"
+        ])
+
+        # 命令执行
+        is_command = user_message.startswith('/') or user_message.startswith('sudo')
+
+        # 构建prompt
+        prompt_parts = []
+
+        # 1. 日程信息部分
+        prompt_parts.append("【可选上下文 - Bot的当前日程】")
+        prompt_parts.append(f"现在：{current_activity}（{description}）")
+
+        # 未来活动
+        if future_activities:
+            max_show = self.get_config(
+                "autonomous_planning.schedule.inject.max_future_activities", 3
+            )
+            prompt_parts.append("接下来的安排:")
+            for i, (time_str, activity_name) in enumerate(future_activities[:max_show]):
+                prompt_parts.append(f"  {time_str} - {activity_name}")
+
+        prompt_parts.append("")  # 空行
+
+        # 2. 使用指导部分（根据消息类型）
+        if is_command:
+            prompt_parts.append("⚠️ 用户正在执行命令，请忽略以上日程信息，专注处理命令。")
+        elif is_tech_question:
+            prompt_parts.append("⚠️ 用户在询问技术问题，请忽略以上日程信息，专注回答技术内容。")
+        elif is_direct_query:
+            prompt_parts.append("💡 用户直接询问当前状态，请如实告知当前活动及状态。")
+        elif is_future_query:
+            prompt_parts.append("💡 用户询问未来计划，请自然地介绍后续安排。")
+        elif is_greeting:
+            prompt_parts.append("💡 用户在问候，可以自然地顺便提一下今天的计划（可选，不要强行提及）。")
+        else:
+            prompt_parts.append("💡 以上是Bot当前的日程信息，仅供参考。")
+            prompt_parts.append("   - 如果与用户问题相关，可以自然提及")
+            prompt_parts.append("   - 如果不相关，请完全忽略此信息")
+            prompt_parts.append("   - 不要为了提及日程而刻意转移话题")
+
+        prompt_parts.append("")  # 空行
+        prompt_parts.append("---")  # 分隔符
+        prompt_parts.append("")
+
+        return "\n".join(prompt_parts)
+
     async def execute(
         self, message: MaiMessages | None
     ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        """执行日程注入（智能版）
+        """执行日程注入（v1.1.0 - LLM软注入 + 对话上下文）
 
-        🆕 智能化改进：
-        1. 使用意图分类器识别用户意图
-        2. 使用状态分析器生成情感化描述
-        3. 使用内容模板引擎动态生成注入内容
-        4. 使用注入优化器防止无效注入
+        🆕 v1.1.0 新特性：
+        1. LLM软注入模式 - 让LLM自己判断是否使用日程信息
+        2. 对话上下文缓存 - 支持连续多轮对话
+        3. 简化状态分析 - 由LLM负责理解状态
+
+        支持3种模式：
+        - smart: LLM自判断（推荐，零额外成本）
+        - rule: 规则引擎判断（原v3.2.0智能模式）
+        - traditional: 固定注入（向后兼容）
 
         向后兼容：
-        - 所有智能组件都是可选的
-        - 如果组件未加载，回退到传统模式
+        - 所有新功能都是可选的
+        - 组件加载失败自动降级
         """
         if not self.enabled or not self.inject_schedule or not message or not message.llm_prompt:
             return True, True, None, None, None
@@ -492,9 +617,17 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             if not chat_id:
                 return True, True, None, None, None
 
-            # 🆕 智能判断：只在用户消息涉及时间时才注入日程
-            if not self._should_inject_schedule(message):
-                return True, True, None, None, None
+            # 提取用户消息和用户ID
+            user_message = self._extract_user_message(message)
+            user_id = self._get_user_id(message)
+
+            # 🆕 检查对话上下文：判断是否在连续讨论日程话题
+            context_continue_inject = False
+            context_reason = None
+            if self.context_cache:
+                context_continue_inject, context_reason = self.context_cache.should_continue_inject(
+                    user_id, None  # 当前活动稍后获取
+                )
 
             # P0修复：检查今天是否有日程，没有则自动生成（原子化操作）
             if self.auto_generate_schedule:
@@ -554,101 +687,145 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             # 获取当前日程（现在返回所有未来活动列表）
             current_activity, current_description, all_future_activities, activity_type = self._get_current_schedule(chat_id)
 
-            # 🆕 使用智能组件生成注入内容
-            inject_content = None
-
-            if self.intent_classifier and self.content_engine and self.inject_optimizer:
-                # 智能模式
-                user_message = self._extract_user_message(message)
-                user_id = self._get_user_id(message)
-                intent, confidence = self.intent_classifier.classify(user_message)
-
-                # 🆕 提取用户询问的时间段
-                time_range = self.intent_classifier.extract_time_range(user_message)
-
-                # 🆕 如果识别到时间段，根据时间段过滤活动列表
-                filtered_activities = all_future_activities
-                if time_range and all_future_activities:
-                    filtered_activities = []
-                    for time_str, activity_name in all_future_activities:
-                        # 解析活动时间 "HH:MM"
-                        try:
-                            hour = int(time_str.split(':')[0].split('-')[0])  # 处理"14:00-16:00"格式
-                            # 检查活动时间是否在询问的时间段内
-                            if time_range.start_hour <= hour < time_range.end_hour:
-                                filtered_activities.append((time_str, activity_name))
-                        except (ValueError, IndexError):
-                            # 解析失败，保留该活动
-                            filtered_activities.append((time_str, activity_name))
-
-                    logger.debug(
-                        f"根据时间段'{time_range.name}'过滤活动: "
-                        f"{len(all_future_activities)} → {len(filtered_activities)}"
-                    )
-
-                # 使用InjectOptimizer判断是否注入
-                should_inject, skip_reason = self.inject_optimizer.should_inject(
-                    user_id, intent, current_activity, confidence
+            # 🆕 更新对话上下文缓存中的当前活动信息
+            if self.context_cache and context_continue_inject:
+                # 如果之前判断需要继续注入，但活动已变化，则更新判断
+                context_continue_inject, context_reason = self.context_cache.should_continue_inject(
+                    user_id, current_activity
                 )
+
+            # 没有当前活动，尝试记录对话但不注入
+            if not current_activity:
+                if self.context_cache:
+                    self.context_cache.add_turn(
+                        user_id=user_id,
+                        user_message=user_message,
+                        intent=None,
+                        injected=False,
+                        activity=None
+                    )
+                return True, True, None, None, None
+
+            # 🆕 模式选择：smart / rule / traditional
+            inject_content = None
+            injected = False
+            detected_intent = None
+
+            if self.inject_mode == "smart":
+                # ============================================================
+                # 🆕 v1.1.0: LLM软注入模式（推荐）
+                # ============================================================
+                # 特点：
+                # 1. 零额外成本（不调用额外LLM）
+                # 2. 准确率更高（LLM理解力强）
+                # 3. 简化状态分析（LLM自己判断）
+
+                # 轻量级预判：技术问答/命令直接跳过
+                msg_lower = user_message.lower()
+                is_command = user_message.startswith('/') or user_message.startswith('sudo')
+                is_tech = any(kw in msg_lower for kw in ["怎么", "如何", "报错", "错误", "bug", "代码", "配置"])
+
+                if is_command or is_tech:
+                    # 技术/命令场景，不注入
+                    logger.debug(f"Smart模式：检测到技术/命令场景，跳过注入")
+                    if self.context_cache:
+                        self.context_cache.add_turn(
+                            user_id=user_id,
+                            user_message=user_message,
+                            intent="tech_or_command",
+                            injected=False,
+                            activity=current_activity
+                        )
+                else:
+                    # 🆕 对话上下文增强：连续对话中强制注入
+                    if context_continue_inject:
+                        logger.info(f"📖 对话上下文触发注入: {context_reason}")
+
+                    # 使用smart模式prompt
+                    inject_content = self._build_smart_inject_prompt(
+                        current_activity=current_activity,
+                        description=current_description,
+                        future_activities=all_future_activities,
+                        user_message=user_message,
+                        activity_type=activity_type
+                    )
+                    injected = True
+                    logger.info(f"✅ Smart注入: {current_activity}")
+
+            elif self.inject_mode == "rule" and self.intent_classifier and self.inject_optimizer:
+                # ============================================================
+                # 规则引擎模式（原v3.2.0智能模式）
+                # ============================================================
+                intent, confidence = self.intent_classifier.classify(user_message)
+                detected_intent = intent.value
+
+                # 🆕 对话上下文增强
+                if context_continue_inject:
+                    logger.info(f"📖 对话上下文触发注入: {context_reason}")
+                    should_inject = True
+                    skip_reason = None
+                else:
+                    # 使用InjectOptimizer判断
+                    should_inject, skip_reason = self.inject_optimizer.should_inject(
+                        user_id, intent, current_activity, confidence
+                    )
 
                 if not should_inject:
-                    logger.debug(f"InjectOptimizer决定跳过注入: {skip_reason}")
-                    return True, True, None, None, None
+                    logger.debug(f"Rule模式：InjectOptimizer决定跳过注入: {skip_reason}")
+                    if self.context_cache:
+                        self.context_cache.add_turn(
+                            user_id=user_id,
+                            user_message=user_message,
+                            intent=detected_intent,
+                            injected=False,
+                            activity=current_activity
+                        )
+                else:
+                    # 使用ContentTemplateEngine生成
+                    if self.content_engine:
+                        inject_content = self.content_engine.build_inject_content(
+                            intent=intent,
+                            current_activity=current_activity,
+                            current_description=current_description,
+                            activity_state=None,
+                            state_desc=current_description,
+                            next_activities=all_future_activities
+                        )
+                        injected = True
+                        # 记录注入历史
+                        if self.inject_optimizer:
+                            self.inject_optimizer.record_injection(
+                                user_id, current_activity, inject_content or "", intent
+                            )
+                        logger.info(
+                            f"✅ Rule注入: intent={intent.value}, "
+                            f"confidence={confidence:.2f}"
+                        )
 
-                # 分析活动状态（如果有当前活动）
-                activity_state = None
-                state_desc = None
-
-                if current_activity and self.state_analyzer and self.ActivityState:
-                    # 获取当前时间和活动时间窗口
-                    # 🔧 修复：统一使用时区感知时间
-                    now = self._get_timezone_now()
-                    current_minutes = now.hour * 60 + now.minute
-
-                    # 🆕 使用真实活动类型，如果没有则回退到 "custom"
-                    # activity_type 可能是: study, meal, entertainment, daily_routine, exercise, social_maintenance, learn_topic, custom
-                    real_activity_type = activity_type if activity_type else "custom"
-
-                    # 简化版：直接使用活动类型生成情感描述
-                    # 假设活动刚开始（这里可以根据实际时间窗口计算）
-                    activity_state = self.ActivityState.IN_PROGRESS
-                    state_desc = self.state_analyzer.generate_emotion_text(
-                        real_activity_type, activity_state
-                    )
-
-                # 使用ContentTemplateEngine生成注入内容
-                inject_content = self.content_engine.build_inject_content(
-                    intent=intent,
-                    current_activity=current_activity,
-                    current_description=current_description,
-                    activity_state=activity_state,
-                    state_desc=state_desc or current_description,
-                    next_activities=filtered_activities  # 🆕 使用过滤后的活动列表
-                )
-
-                # 记录注入历史
-                if inject_content:
-                    self.inject_optimizer.record_injection(
-                        user_id, current_activity or "无", inject_content, intent  # 🆕 传入意图
-                    )
-                    logger.info(
-                        f"✅ 智能注入: intent={intent.value}, "
-                        f"confidence={confidence:.2f}, content={inject_content[:50]}..."
-                    )
             else:
+                # ============================================================
                 # 传统模式（向后兼容）
-                if current_activity:
-                    inject_content = f"【当前状态】\n这会儿正{current_activity}"
-                    if current_description:
-                        inject_content += f"（{current_description}）"
-                    inject_content += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
-                    # 🆕 使用所有未来活动列表
-                    if all_future_activities:
-                        # 传统模式只显示第一个活动（向后兼容）
-                        next_time, next_activity = all_future_activities[0]
-                        inject_content += f"\n等下{next_time}要{next_activity}。"
-                    inject_content += "\n"
-                    logger.info(f"✅ 传统注入: {current_activity}")
+                # ============================================================
+                inject_content = f"【当前状态】\n这会儿正{current_activity}"
+                if current_description:
+                    inject_content += f"（{current_description}）"
+                inject_content += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
+                if all_future_activities:
+                    next_time, next_activity = all_future_activities[0]
+                    inject_content += f"\n等下{next_time}要{next_activity}。"
+                inject_content += "\n"
+                injected = True
+                logger.info(f"✅ Traditional注入: {current_activity}")
+
+            # 🆕 记录到对话上下文缓存
+            if self.context_cache:
+                self.context_cache.add_turn(
+                    user_id=user_id,
+                    user_message=user_message,
+                    intent=detected_intent,
+                    injected=injected,
+                    activity=current_activity
+                )
 
             # 注入日程信息到prompt
             if inject_content:
