@@ -47,7 +47,7 @@ class ScheduleQualityScorer:
         >>> config = {
         ...     'min_activities': 8,
         ...     'max_activities': 15,
-        ...     'min_description_length': 15,
+        ...     'min_description_length': 20,
         ...     'max_description_length': 50
         ... }
         >>> scorer = ScheduleQualityScorer(config)
@@ -119,7 +119,7 @@ class ScheduleQualityScorer:
         # 读取配置参数
         min_activities = self.config.get('min_activities', 8)
         max_activities = self.config.get('max_activities', 15)
-        min_desc_len = self.config.get('min_description_length', 15)
+        min_desc_len = self.config.get('min_description_length', 20)
         max_desc_len = self.config.get('max_description_length', 50)
         target_desc_len = (min_desc_len + max_desc_len) // 2
 

@@ -11,6 +11,7 @@ from ..planner.goal_manager import get_goal_manager, GoalStatus
 from ..planner.schedule_generator import ScheduleGenerator, ScheduleType
 from ..utils.schedule_image_generator import ScheduleImageGenerator
 from ..utils.time_utils import format_minutes_to_time, get_time_window_from_goal
+from ..utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.commands")
 
@@ -20,6 +21,15 @@ class PlanningCommand(BaseCommand):
     command_name = "planning"
     command_description = "麦麦自主规划系统管理命令"
     command_pattern = r"(?P<planning_cmd>^/(plan|规划).*$)"
+
+    def __init__(self, *args, **kwargs):
+        """初始化命令处理器"""
+        super().__init__(*args, **kwargs)
+        # 读取详细描述配置
+        self.enable_detailed_description = self.get_config("autonomous_planning.schedule.enable_detailed_description", True)
+        # 初始化时区管理器
+        timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+        self.tz_manager = TimezoneManager(timezone_str)
 
     def _get_today_schedule_goals(self, goal_manager) -> List:
         """
@@ -102,9 +112,9 @@ class PlanningCommand(BaseCommand):
                 schedule_goals = self._sort_schedule_goals(schedule_goals)
 
                 # 获取今天的日期和星期
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = self.tz_manager.get_now().strftime("%Y-%m-%d")
                 weekday_cn = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
-                weekday = weekday_cn[datetime.now().weekday()]
+                weekday = weekday_cn[self.tz_manager.get_now().weekday()]
 
                 messages = [f"📅 今日日程 {today} {weekday}\n"]
                 messages.append(f"共 {len(schedule_goals)} 项活动\n")
@@ -133,8 +143,8 @@ class PlanningCommand(BaseCommand):
                     # 详细格式：序号、时间、emoji、名称
                     messages.append(f"{idx}. ⏰ {start_time}-{end_time}  {type_emoji} {goal.name}")
 
-                    # 添加描述
-                    if goal.description:
+                    # 根据配置决定是否添加描述
+                    if self.enable_detailed_description and goal.description:
                         messages.append(f"   📝 {goal.description}")
 
                     messages.append("")  # 空行分隔
@@ -164,7 +174,8 @@ class PlanningCommand(BaseCommand):
                     schedule_items.append({
                         "time": time_str,
                         "name": goal.name,
-                        "description": goal.description,
+                        # 根据配置决定是否包含描述
+                        "description": goal.description if self.enable_detailed_description else "",
                         "goal_type": goal.goal_type
                     })
 
@@ -173,9 +184,9 @@ class PlanningCommand(BaseCommand):
                 img_base64 = None
                 try:
                     # 简化标题：只显示日期，不显示emoji
-                    today = datetime.now().strftime("%Y-%m-%d")
+                    today = self.tz_manager.get_now().strftime("%Y-%m-%d")
                     weekday_cn = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
-                    weekday = weekday_cn[datetime.now().weekday()]
+                    weekday = weekday_cn[self.tz_manager.get_now().weekday()]
                     title = f"今日日程 {today} {weekday}"
 
                     img_path, img_base64 = ScheduleImageGenerator.generate_schedule_image(
@@ -194,7 +205,9 @@ class PlanningCommand(BaseCommand):
                         messages = ["📅 今日日程详情\n"]
                         for item in schedule_items:
                             messages.append(f"  ⏰ {item['time']}  {item['name']}")
-                            messages.append(f"     {item['description']}")
+                            # 根据配置决定是否显示描述
+                            if self.enable_detailed_description and item['description']:
+                                messages.append(f"     {item['description']}")
                             messages.append("")
                         await self.send_text("\n".join(messages))
                     except Exception as e2:
@@ -252,8 +265,8 @@ class PlanningCommand(BaseCommand):
 
             # 计算截止日期
             from datetime import timedelta
-            cutoff_date = datetime.now() - timedelta(days=days_to_keep)
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            cutoff_date = self.tz_manager.get_now() - timedelta(days=days_to_keep)
+            today_str = self.tz_manager.get_now().strftime("%Y-%m-%d")
 
             # 找出要清理的日程目标
             goals = goal_manager.get_all_goals()

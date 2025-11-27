@@ -202,7 +202,7 @@ class ActivityStateAnalyzer:
             },
         }
 
-        logger.info("活动状态分析器初始化完成")
+        logger.debug("活动状态分析器初始化完成")
 
     def analyze_activity_state(
         self,

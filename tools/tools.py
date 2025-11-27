@@ -21,6 +21,7 @@ from ..planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
 from ..planner.schedule_generator import ScheduleGenerator, ScheduleType
 from ..core.exceptions import InvalidParametersError, InvalidTimeWindowError
 from ..core.parameter_validator import ParameterValidator
+from ..utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.tools")
 
@@ -234,8 +235,10 @@ class ManageGoalTool(BaseTool):
                 # 解析parameters参数
                 parameters = _parse_json_parameters(function_args.get("parameters", {}))
 
-                # 计算时间
-                deadline = datetime.now() + timedelta(hours=deadline_hours) if deadline_hours else None
+                # 计算时间 - 使用时区感知时间
+                timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+                tz_manager = TimezoneManager(timezone_str)
+                deadline = tz_manager.get_now() + timedelta(hours=deadline_hours) if deadline_hours else None
 
                 # 将time_window存入parameters
                 if time_window:
@@ -404,6 +407,9 @@ class GetPlanningStatusTool(BaseTool):
             goal_manager = get_goal_manager()
             detailed = function_args.get("detailed", False)
 
+            # 读取详细描述配置
+            enable_detailed_description = self.get_config("autonomous_planning.schedule.enable_detailed_description", True)
+
             # 🔧 修复：使用统一的 get_schedule_goals() 方法（包含日期过滤）
             schedule_goals = goal_manager.get_schedule_goals(chat_id="global")
 
@@ -411,13 +417,9 @@ class GetPlanningStatusTool(BaseTool):
                 return {"type": "planning_status", "content": "📅 今天还没有日程"}
 
             # 获取时区感知的当前时间
-            try:
-                timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
-                import pytz
-                tz = pytz.timezone(timezone_str)
-                now = datetime.now(tz)
-            except (ImportError, Exception):
-                now = datetime.now()
+            timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+            tz_manager = TimezoneManager(timezone_str)
+            now = tz_manager.get_now()
 
             current_minutes = now.hour * 60 + now.minute
 
@@ -463,12 +465,13 @@ class GetPlanningStatusTool(BaseTool):
                 start_time = format_time(time_window[0])
                 end_time = format_time(time_window[1])
 
-                # 获取目标描述（如果有）
+                # 根据配置决定是否获取目标描述
                 desc = ""
-                if goal.parameters and "description" in goal.parameters:
-                    desc = goal.parameters["description"]
-                    if len(desc) > 30:
-                        desc = desc[:27] + "..."
+                if enable_detailed_description:
+                    if goal.parameters and "description" in goal.parameters:
+                        desc = goal.parameters["description"]
+                        if len(desc) > 30:
+                            desc = desc[:27] + "..."
 
                 if desc:
                     return f"{status_emoji}{start_time}-{end_time} {goal.name}\n   💭 {desc}"
@@ -540,7 +543,8 @@ class GenerateScheduleTool(BaseTool):
                 "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
                 "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
                 "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
-                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "enable_detailed_description": self.get_config("autonomous_planning.schedule.enable_detailed_description", True),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 20),
                 "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
                 "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
                 "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),
@@ -637,7 +641,8 @@ class ApplyScheduleTool(BaseTool):
                 "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
                 "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
                 "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
-                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "enable_detailed_description": self.get_config("autonomous_planning.schedule.enable_detailed_description", True),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 20),
                 "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
                 "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
                 "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),

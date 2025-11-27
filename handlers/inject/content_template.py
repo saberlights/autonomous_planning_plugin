@@ -78,7 +78,7 @@ class ContentTemplateEngine:
             ],
         }
 
-        logger.info("内容模板引擎初始化完成")
+        logger.debug("内容模板引擎初始化完成")
 
     def build_inject_content(
         self,
@@ -269,4 +269,4 @@ class ContentTemplateEngine:
             self.templates[intent] = []
 
         self.templates[intent].append(template)
-        logger.info(f"添加自定义模板: intent={intent.value}")
+        logger.debug(f"添加自定义模板: intent={intent.value}")

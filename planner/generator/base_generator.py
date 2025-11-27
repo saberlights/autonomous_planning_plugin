@@ -89,7 +89,7 @@ class BaseScheduleGenerator:
                     logger.warning("自定义模型配置不完整，回退到主回复模型")
                     return self._get_default_model_config()
 
-                logger.info(f"使用自定义模型: {model_name} @ {api_base} (max_tokens={max_tokens}, temperature={temperature})")
+                logger.debug(f"使用自定义模型: {model_name} @ {api_base} (max_tokens={max_tokens}, temperature={temperature})")
 
                 # 构建自定义模型配置 - 需要创建完整的配置对象
                 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
@@ -151,7 +151,7 @@ class BaseScheduleGenerator:
         # 从主回复模型配置读取 temperature
         temperature = getattr(model_config, 'temperature', 0.7)
 
-        logger.info(f"使用主回复模型 (max_tokens={max_tokens}, temperature={temperature})")
+        logger.debug(f"使用主回复模型 (max_tokens={max_tokens}, temperature={temperature})")
 
         return model_config, max_tokens, temperature
 

@@ -62,7 +62,8 @@ class ScheduleGeneratorConfig:
         self.max_activities = config_dict.get('max_activities', 15)
 
         # === 描述长度配置 ===
-        self.min_description_length = config_dict.get('min_description_length', 15)
+        self.enable_detailed_description = config_dict.get('enable_detailed_description', True)
+        self.min_description_length = config_dict.get('min_description_length', 20)
         self.max_description_length = config_dict.get('max_description_length', 50)
 
         # === 多轮生成配置 ===
@@ -182,6 +183,7 @@ class ScheduleGeneratorConfig:
         return {
             'min_activities': self.min_activities,
             'max_activities': self.max_activities,
+            'enable_detailed_description': self.enable_detailed_description,
             'min_description_length': self.min_description_length,
             'max_description_length': self.max_description_length,
             'use_multi_round': self.use_multi_round,

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
+from ..utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.database")
 
@@ -60,9 +61,12 @@ class GoalDatabase:
     # Database schema version for migrations
     SCHEMA_VERSION = 1
 
-    def __init__(self, db_path: str = "data/goals.db", backup_on_init: bool = True):
+    def __init__(self, db_path: str = "data/goals.db", backup_on_init: bool = True, timezone: str = "Asia/Shanghai"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialize timezone manager
+        self.tz_manager = TimezoneManager(timezone)
 
         # Thread-local storage for connections
         self._local = threading.local()
@@ -72,9 +76,12 @@ class GoalDatabase:
             self._create_backup()
 
         # Initialize schema
-        self._init_schema()
-
-        logger.info(f"Initialized GoalDatabase at {self.db_path}")
+        try:
+            self._init_schema()
+            logger.debug(f"Initialized GoalDatabase at {self.db_path}")
+        except Exception as e:
+            logger.critical(f"❌ CRITICAL: Failed to initialize GoalDatabase at {self.db_path}: {e}", exc_info=True)
+            raise
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get thread-local database connection.
@@ -116,6 +123,9 @@ class GoalDatabase:
         except Exception as e:
             conn.rollback()
             logger.error(f"Transaction failed: {e}", exc_info=True)
+            # 如果是数据库损坏，记录CRITICAL级别
+            if "database disk image is malformed" in str(e).lower() or "database is locked" in str(e).lower():
+                logger.critical(f"❌ CRITICAL: Database corruption or lock detected: {e}")
             raise
 
     def _create_backup(self) -> None:
@@ -124,9 +134,9 @@ class GoalDatabase:
         backup_path = self.db_path.with_suffix('.db.bak')
         try:
             shutil.copy2(self.db_path, backup_path)
-            logger.info(f"Created database backup: {backup_path}")
+            logger.debug(f"Created database backup: {backup_path}")
         except Exception as e:
-            logger.warning(f"Failed to create database backup: {e}")
+            logger.error(f"Failed to create database backup: {e}")
 
     def _init_schema(self) -> None:
         """Initialize database schema."""
@@ -242,7 +252,7 @@ class GoalDatabase:
             sqlite3.IntegrityError: If goal_id already exists
         """
         if created_at is None:
-            created_at = datetime.now()
+            created_at = self.tz_manager.get_now()
 
         with self._transaction() as conn:
             conn.execute("""
@@ -269,7 +279,7 @@ class GoalDatabase:
                 progress,
                 last_executed_at.isoformat() if last_executed_at else None,
                 execution_count,
-                datetime.now().isoformat()
+                self.tz_manager.get_now().isoformat()
             ))
 
         logger.debug(f"Created goal: {goal_id}")
@@ -409,7 +419,7 @@ class GoalDatabase:
 
         # Always update updated_at
         set_clauses.append("updated_at = ?")
-        params.append(datetime.now().isoformat())
+        params.append(self.tz_manager.get_now().isoformat())
 
         params.append(goal_id)
 

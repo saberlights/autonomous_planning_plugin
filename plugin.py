@@ -25,7 +25,10 @@ class AutonomousPlanningPlugin(BasePlugin):
 
     config_section_descriptions = {
         "plugin": "插件基本配置",
-        "autonomous_planning": "自主规划配置"
+        "autonomous_planning": "自主规划总配置",
+        "autonomous_planning.schedule": "日程管理配置",
+        "autonomous_planning.schedule.inject": "智能注入配置",
+        "autonomous_planning.schedule.custom_model": "自定义模型配置"
     }
 
     config_schema: dict = {
@@ -59,116 +62,171 @@ class AutonomousPlanningPlugin(BasePlugin):
                     default=True,
                     description="询问日程时自动检查并生成"
                 ),
-                # 多轮生成配置
+                # 🆕 智能注入配置（v1.1.0新增）
+                "inject": {
+                    "inject_mode": ConfigField(
+                        type=str,
+                        default="smart",
+                        description="注入模式：smart(智能注入) 或 traditional(传统模式)"
+                    ),
+                    "enable_intent_classification": ConfigField(
+                        type=bool,
+                        default=True,
+                        description="启用意图分类（识别用户询问类型）"
+                    ),
+                    "enable_state_analysis": ConfigField(
+                        type=bool,
+                        default=True,
+                        description="启用状态分析（生成情感化活动描述）"
+                    ),
+                    "enable_inject_optimization": ConfigField(
+                        type=bool,
+                        default=True,
+                        description="启用注入优化（防止重复注入和无效打扰）"
+                    ),
+                    "casual_chat_inject_probability": ConfigField(
+                        type=float,
+                        default=0.5,
+                        description="闲聊时的注入概率（0.0-1.0）"
+                    ),
+                    "context_max_turns": ConfigField(
+                        type=int,
+                        default=3,
+                        description="对话上下文保留轮数"
+                    ),
+                    "context_ttl": ConfigField(
+                        type=int,
+                        default=600,
+                        description="对话上下文过期时间（秒）"
+                    ),
+                },
+                # 🎨 自定义提示词配置
+                "custom_prompt": ConfigField(
+                    type=str,
+                    default="",
+                    description="自定义日程生成提示词（如\"今天想多运动\"、\"专注学习\"等，留空则使用默认风格）"
+                ),
+                "max_future_activities": ConfigField(
+                    type=int,
+                    default=3,
+                    description="智能注入时最多显示的未来活动数量"
+                ),
+                # 🎯 多轮生成配置
                 "use_multi_round": ConfigField(
                     type=bool,
                     default=True,
-                    description="启用多轮生成机制"
+                    description="启用多轮生成机制（通过多轮优化提升日程质量）"
                 ),
                 "max_rounds": ConfigField(
                     type=int,
                     default=2,
-                    description="最多尝试轮数（1-3）"
+                    description="最多生成轮数（1-3轮，推荐2轮）"
                 ),
                 "quality_threshold": ConfigField(
                     type=float,
                     default=0.85,
-                    description="质量阈值（0.80-0.90）"
+                    description="质量阈值（0.80-0.90，达到此分数即停止优化）"
                 ),
-                # 生成参数
+                # 📊 生成参数配置
                 "min_activities": ConfigField(
                     type=int,
                     default=8,
-                    description="最少活动数量"
+                    description="最少活动数量（建议8-10个）"
                 ),
                 "max_activities": ConfigField(
                     type=int,
                     default=15,
-                    description="最多活动数量"
+                    description="最多活动数量（建议12-15个）"
+                ),
+                "enable_detailed_description": ConfigField(
+                    type=bool,
+                    default=True,
+                    description="是否启用详细活动描述（关闭后生成、注入、命令都不显示详细描述）"
                 ),
                 "min_description_length": ConfigField(
                     type=int,
-                    default=15,
-                    description="描述最小长度"
+                    default=20,
+                    description="活动描述最小字符数"
                 ),
                 "max_description_length": ConfigField(
                     type=int,
                     default=50,
-                    description="描述最大长度"
+                    description="活动描述最大字符数"
                 ),
                 "max_tokens": ConfigField(
                     type=int,
                     default=8192,
-                    description="日程生成的最大token数"
+                    description="AI生成的最大token数"
                 ),
                 "generation_timeout": ConfigField(
                     type=float,
                     default=180.0,
-                    description="日程生成超时时间（秒）"
+                    description="单次生成超时时间（秒，推荐120-300秒）"
                 ),
-                # 缓存配置
+                # 💾 缓存配置
                 "cache_ttl": ConfigField(
                     type=int,
                     default=300,
-                    description="缓存TTL（秒）"
+                    description="日程缓存有效期（秒，默认5分钟）"
                 ),
                 "cache_max_size": ConfigField(
                     type=int,
                     default=100,
-                    description="缓存最大条目数"
+                    description="缓存最大条目数（LRU策略）"
                 ),
-                # 定时自动生成配置
+                # ⏰ 定时自动生成配置
                 "auto_schedule_enabled": ConfigField(
                     type=bool,
                     default=True,
-                    description="是否启用定时自动生成日程"
+                    description="每天定时自动生成日程"
                 ),
                 "auto_schedule_time": ConfigField(
                     type=str,
                     default="00:30",
-                    description="每天自动生成日程的时间（HH:MM格式）"
+                    description="自动生成时间（HH:MM格式，如00:30表示凌晨0点30分）"
                 ),
                 "timezone": ConfigField(
                     type=str,
                     default="Asia/Shanghai",
-                    description="时区设置"
+                    description="时区设置（如Asia/Shanghai、UTC等）"
                 ),
-                # 权限配置
+                # 🔐 权限配置
                 "admin_users": ConfigField(
                     type=list,
                     default=[],
-                    description="管理员QQ号列表，格式: [\"12345\", \"67890\"]，留空则所有人可用"
+                    description="管理员QQ号列表（如[\\\"12345\\\", \\\"67890\\\"]，留空则所有人可用）"
                 ),
+                # 🤖 自定义模型配置
                 "custom_model": {
                     "enabled": ConfigField(
                         type=bool,
                         default=False,
-                        description="是否启用自定义模型"
+                        description="使用自定义AI模型（不使用主回复模型）"
                     ),
                     "model_name": ConfigField(
                         type=str,
                         default="",
-                        description="模型名称"
+                        description="模型名称（如gpt-4、claude-3-opus等）"
                     ),
                     "api_base": ConfigField(
                         type=str,
                         default="",
-                        description="API地址"
+                        description="API地址（如https://api.openai.com/v1）"
                     ),
                     "api_key": ConfigField(
                         type=str,
                         default="",
-                        description="API密钥"
+                        description="API密钥（建议使用环境变量）"
                     ),
                     "provider": ConfigField(
                         type=str,
                         default="",
-                        description="提供商类型"
+                        description="提供商类型（openai、anthropic、azure等）"
                     ),
                     "temperature": ConfigField(
                         type=float,
                         default=0.7,
-                        description="温度参数（0.0-1.0）"
+                        description="生成温度参数（0.0-1.0，越高越随机）"
                     ),
                 },
             },
@@ -179,7 +237,7 @@ class AutonomousPlanningPlugin(BasePlugin):
         """初始化插件"""
         super().__init__(*args, **kwargs)
         self.scheduler = None
-        logger.info("自主规划插件初始化完成")
+        logger.debug("自主规划插件初始化完成")
         # 延迟启动调度器，确保插件系统完全初始化
         asyncio.create_task(self._start_scheduler_after_delay())
 

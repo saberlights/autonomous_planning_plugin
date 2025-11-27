@@ -12,6 +12,7 @@ from ..planner.goal_manager import get_goal_manager
 from ..planner.schedule_generator import ScheduleGenerator
 from ..cache import LRUCache
 from ..utils.time_utils import parse_time_window
+from ..utils.timezone_manager import TimezoneManager
 from .exception_handler import handle_exception, handle_exception_silent
 
 logger = get_logger("autonomous_planning.handlers")
@@ -32,7 +33,7 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
         self.is_running = False
         self.enabled = self.get_config("plugin.enabled", True)
         self.cleanup_interval = self.get_config("autonomous_planning.cleanup_interval", 3600)  # 每小时清理一次
-        logger.info(f"自主规划维护任务初始化完成 (清理间隔: {self.cleanup_interval}秒)")
+        logger.debug(f"自主规划维护任务初始化完成 (清理间隔: {self.cleanup_interval}秒)")
 
     async def execute(
         self, message: MaiMessages | None
@@ -73,7 +74,7 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
         调用此方法停止后台清理任务
         """
         if self.is_running:
-            logger.info("正在停止目标清理循环...")
+            logger.debug("正在停止目标清理循环...")
             self.is_running = False
 
             # 等待任务结束（最多3秒）
@@ -133,6 +134,9 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         self.enabled = self.get_config("plugin.enabled", True)
         self.inject_schedule = self.get_config("autonomous_planning.schedule.inject_schedule", True)
         self.auto_generate_schedule = self.get_config("autonomous_planning.schedule.auto_generate", True)
+
+        # 读取详细描述配置
+        self.enable_detailed_description = self.get_config("autonomous_planning.schedule.enable_detailed_description", True)
 
         # P2优化：从配置读取缓存参数
         cache_max_size = self.get_config("autonomous_planning.schedule.cache_max_size", 100)
@@ -204,7 +208,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             # 保存 ActivityState 类引用，供 execute 使用
             self.ActivityState = ActivityState
 
-            logger.info(
+            logger.debug(
                 f"✅ 智能日程注入组件已加载 "
                 f"(模式: {inject_mode}, "
                 f"意图分类: {enable_intent_classification}, "
@@ -222,10 +226,14 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             self.context_cache = None
             self.ActivityState = None
 
+        # 初始化时区管理器
+        timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+        self.tz_manager = TimezoneManager(timezone_str)
+
         if self.enabled and self.inject_schedule:
-            logger.info(f"日程注入功能已启用（缓存TTL: {self._schedule_cache_ttl}秒，最大{cache_max_size}项）")
+            logger.debug(f"日程注入功能已启用（缓存TTL: {self._schedule_cache_ttl}秒，最大{cache_max_size}项）")
             if self.auto_generate_schedule:
-                logger.info("日程自动生成功能已启用")
+                logger.debug("日程自动生成功能已启用")
             asyncio.create_task(self._preheat_cache())  # 启动缓存预热
 
     def _get_timezone_now(self):
@@ -239,24 +247,16 @@ class ScheduleInjectEventHandler(BaseEventHandler):
             datetime.datetime: 当前时间对象
         """
         timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
-        try:
-            import pytz
-            tz = pytz.timezone(timezone_str)
-            return datetime.now(tz)
-        except ImportError:
-            logger.warning("pytz模块未安装，使用系统时间")
-            return datetime.now()
-        except Exception as e:
-            logger.warning(f"时区处理出错: {e}，使用系统时间")
-            return datetime.now()
+        # 使用 TimezoneManager 统一处理时区
+        return self.tz_manager.get_now()
 
     @handle_exception_silent("缓存预热失败: {e}", log_level="warning")
     async def _preheat_cache(self):
         """预热缓存 - 启动时提前加载全局日程"""
         await asyncio.sleep(5)  # 等待系统初始化
-        logger.info("🔥 开始预热日程缓存...")
+        logger.debug("🔥 开始预热日程缓存...")
         self._get_current_schedule("global")
-        logger.info("✅ 日程缓存预热完成")
+        logger.debug("✅ 日程缓存预热完成")
 
     @handle_exception("检查今天日程失败: {e}", log_level="warning", default_return=False)
     def _check_today_schedule_exists(self, chat_id: str = "global") -> bool:
@@ -328,10 +328,11 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         schedule_config = {
             "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", False),
             "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 1),
-            "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.80),
+            "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
             "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
             "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
-            "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+            "enable_detailed_description": self.get_config("autonomous_planning.schedule.enable_detailed_description", True),
+            "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 20),
             "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
             "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
             "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),
@@ -355,7 +356,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
 
         # 🔧 修复：如果日程已存在（metadata中标记existing=True），跳过应用
         if schedule.metadata and schedule.metadata.get("existing"):
-            logger.info(f"📅 今天已有日程（{len(schedule.items)}个活动），跳过应用")
+            logger.debug(f"📅 今天已有日程（{len(schedule.items)}个活动），跳过应用")
             return True
 
         # 应用日程
@@ -554,7 +555,11 @@ class ScheduleInjectEventHandler(BaseEventHandler):
 
         # 1. 日程信息部分
         prompt_parts.append("【可选上下文 - Bot的当前日程】")
-        prompt_parts.append(f"现在：{current_activity}（{description}）")
+        # 根据配置决定是否显示详细描述
+        if self.enable_detailed_description and description:
+            prompt_parts.append(f"现在：{current_activity}（{description}）")
+        else:
+            prompt_parts.append(f"现在：{current_activity}")
 
         # 未来活动
         if future_activities:
@@ -783,12 +788,14 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 else:
                     # 使用ContentTemplateEngine生成
                     if self.content_engine:
+                        # 根据配置决定是否传入描述
+                        desc_to_inject = current_description if self.enable_detailed_description else None
                         inject_content = self.content_engine.build_inject_content(
                             intent=intent,
                             current_activity=current_activity,
-                            current_description=current_description,
+                            current_description=desc_to_inject,
                             activity_state=None,
-                            state_desc=current_description,
+                            state_desc=desc_to_inject,
                             next_activities=all_future_activities
                         )
                         injected = True
@@ -807,7 +814,8 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 # 传统模式（向后兼容）
                 # ============================================================
                 inject_content = f"【当前状态】\n这会儿正{current_activity}"
-                if current_description:
+                # 根据配置决定是否显示详细描述
+                if self.enable_detailed_description and current_description:
                     inject_content += f"（{current_description}）"
                 inject_content += f"\n回复时可以自然提到当前在做什么，不要刻意强调。"
                 if all_future_activities:

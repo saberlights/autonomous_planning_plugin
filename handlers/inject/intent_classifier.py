@@ -120,7 +120,7 @@ class IntentClassifier:
         # 预编译正则表达式（性能优化）
         self._command_regex = re.compile('|'.join(self.command_patterns))
 
-        logger.info("意图分类器初始化完成")
+        logger.debug("意图分类器初始化完成")
 
     def classify(self, message: str) -> Tuple[UserIntent, float]:
         """分类用户消息意图

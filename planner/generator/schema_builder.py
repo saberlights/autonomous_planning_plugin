@@ -53,8 +53,30 @@ class SchemaBuilder:
         # 从配置读取参数
         min_activities = self.config.get('min_activities', 8)
         max_activities = self.config.get('max_activities', 15)
-        min_desc_len = self.config.get('min_description_length', 15)
+        enable_detailed_description = self.config.get('enable_detailed_description', True)
+        min_desc_len = self.config.get('min_description_length', 20)
         max_desc_len = self.config.get('max_description_length', 50)
+
+        # 如果禁用详细描述，description不是必需字段
+        required_fields = ["name", "time_slot", "goal_type", "priority"]
+        if enable_detailed_description:
+            required_fields.append("description")
+
+        # description的schema配置
+        if enable_detailed_description:
+            description_schema = {
+                "type": "string",
+                "minLength": min_desc_len,
+                "maxLength": max_desc_len,
+                "description": f"活动描述（叙述风格，{min_desc_len}-{max_desc_len}字）"
+            }
+        else:
+            # 不启用详细描述时，允许空字符串
+            description_schema = {
+                "type": "string",
+                "maxLength": 0,
+                "description": "活动描述（留空即可）"
+            }
 
         self._cached_schema = {
             "type": "object",
@@ -66,7 +88,7 @@ class SchemaBuilder:
                     "maxItems": max_activities,
                     "items": {
                         "type": "object",
-                        "required": ["name", "description", "time_slot", "goal_type", "priority"],
+                        "required": required_fields,
                         "properties": {
                             "name": {
                                 "type": "string",
@@ -74,12 +96,7 @@ class SchemaBuilder:
                                 "maxLength": 20,
                                 "description": "活动名称"
                             },
-                            "description": {
-                                "type": "string",
-                                "minLength": min_desc_len,
-                                "maxLength": max_desc_len,
-                                "description": f"活动描述（叙述风格，{min_desc_len}-{max_desc_len}字）"
-                            },
+                            "description": description_schema,
                             "time_slot": {
                                 "type": "string",
                                 "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",

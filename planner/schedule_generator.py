@@ -90,7 +90,7 @@ class ScheduleGenerator:
         # 🆕 使用语义验证器
         self.validator = ScheduleSemanticValidator()
 
-        logger.info(f"ScheduleGenerator初始化完成: {self.config}")
+        logger.debug(f"ScheduleGenerator初始化完成: {self.config}")
 
     # ========================================================================
     # 公开API（保持向后兼容）
@@ -118,7 +118,7 @@ class ScheduleGenerator:
         Returns:
             Schedule对象
         """
-        logger.info(f"生成每日计划: user={user_id}, chat={chat_id}")
+        logger.debug(f"生成每日计划: user={user_id}, chat={chat_id}")
 
         # 检查今天是否已有日程（防止重复生成）
         if not force_regenerate:
@@ -224,7 +224,7 @@ class ScheduleGenerator:
         Returns:
             Schedule对象
         """
-        logger.info(f"生成每周计划: user={user_id}, chat={chat_id}")
+        logger.debug(f"生成每周计划: user={user_id}, chat={chat_id}")
 
         # 从配置读取多轮生成设置
         if use_multi_round is None:
@@ -249,7 +249,7 @@ class ScheduleGenerator:
             )
 
         # 获取本周日期范围
-        today = datetime.now()
+        today = self.tz_manager.get_now()
         start_of_week = today - timedelta(days=today.weekday())
         end_of_week = start_of_week + timedelta(days=6)
 
@@ -283,7 +283,7 @@ class ScheduleGenerator:
         Returns:
             Schedule对象
         """
-        logger.info(f"生成每月计划: user={user_id}, chat={chat_id}")
+        logger.debug(f"生成每月计划: user={user_id}, chat={chat_id}")
 
         # 从配置读取多轮生成设置
         if use_multi_round is None:
@@ -307,7 +307,7 @@ class ScheduleGenerator:
                 preferences=preferences
             )
 
-        today = datetime.now()
+        today = self.tz_manager.get_now()
         schedule = Schedule(
             schedule_type=ScheduleType.MONTHLY,
             name=f"每月计划 - {today.strftime('%Y年%m月')}",
@@ -336,7 +336,7 @@ class ScheduleGenerator:
         Returns:
             创建的目标ID列表
         """
-        logger.info(f"应用日程: {schedule.name}")
+        logger.debug(f"应用日程: {schedule.name}")
 
         goals_data = []
 
@@ -439,7 +439,7 @@ class ScheduleGenerator:
         validation_warnings = []
 
         for round_num in range(1, max_rounds + 1):
-            logger.info(f"🔄 第{round_num}轮生成...")
+            logger.debug(f"🔄 第{round_num}轮生成...")
 
             try:
                 # 构建Prompt
@@ -462,7 +462,7 @@ class ScheduleGenerator:
                 validated_items, warnings = self.validator.validate(raw_items)
                 score = self.quality_scorer.calculate_score(validated_items, warnings)
 
-                logger.info(f"📊 第{round_num}轮质量分数: {score:.2f}")
+                logger.debug(f"📊 第{round_num}轮质量分数: {score:.2f}")
 
                 # 更新最佳结果
                 if score > best_score:
@@ -472,7 +472,7 @@ class ScheduleGenerator:
 
                 # 如果分数足够高，提前结束
                 if score >= quality_threshold:
-                    logger.info(f"✅ 质量达标，结束生成")
+                    logger.debug(f"✅ 质量达标，结束生成")
                     break
 
             except Exception as e:
@@ -488,7 +488,7 @@ class ScheduleGenerator:
         # 转换为ScheduleItem对象
         schedule_items = self._dict_to_schedule_items(best_schedule)
 
-        logger.info(f"✅ 生成 {len(schedule_items)} 个日程项（质量: {best_score:.2f}）")
+        logger.debug(f"✅ 生成 {len(schedule_items)} 个日程项（质量: {best_score:.2f}）")
         return schedule_items
 
     async def _generate_single_round(
@@ -499,7 +499,7 @@ class ScheduleGenerator:
         preferences: Dict[str, Any]
     ) -> List[ScheduleItem]:
         """单轮生成"""
-        logger.info("使用单轮生成模式")
+        logger.debug("使用单轮生成模式")
 
         # 构建Prompt
         schema = self.base_generator.build_json_schema()

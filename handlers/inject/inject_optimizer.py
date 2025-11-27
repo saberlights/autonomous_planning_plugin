@@ -48,7 +48,7 @@ class InjectOptimizer:
         self.cache_ttl = cache_ttl
         self.casual_inject_probability = casual_inject_probability
 
-        logger.info(
+        logger.debug(
             f"注入优化器初始化完成: TTL={cache_ttl}秒, "
             f"闲聊注入概率={casual_inject_probability}"
         )
@@ -243,7 +243,7 @@ class InjectOptimizer:
         """
         if user_id in self.inject_history:
             del self.inject_history[user_id]
-            logger.info(f"重置用户注入历史: user={user_id}")
+            logger.debug(f"重置用户注入历史: user={user_id}")
 
     def get_total_inject_count(self) -> int:
         """获取总注入次数（所有用户）
@@ -274,4 +274,4 @@ class InjectOptimizer:
             raise ValueError(f"概率值必须在0-1之间，当前值: {probability}")
 
         self.casual_inject_probability = probability
-        logger.info(f"闲聊注入概率已调整为: {probability}")
+        logger.debug(f"闲聊注入概率已调整为: {probability}")

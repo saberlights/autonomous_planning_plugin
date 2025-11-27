@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 from src.common.logger import get_logger
 
 from ..database import GoalDatabase
+from ..utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.goal_manager")
 
@@ -106,7 +107,11 @@ class Goal:
         self.creator_id = creator_id
         self.chat_id = chat_id
         self.status = status if isinstance(status, GoalStatus) else GoalStatus(status)
-        self.created_at = created_at or datetime.now()
+        # 使用时区感知时间（向后兼容）
+        if created_at is None:
+            tz_manager = TimezoneManager()  # 使用默认时区
+            created_at = tz_manager.get_now()
+        self.created_at = created_at
         self.deadline = deadline
         self.conditions = conditions or {}
         self.parameters = parameters or {}
@@ -200,20 +205,23 @@ class Goal:
         # Check time_window if present
         time_window = self.parameters.get("time_window") if self.parameters else None
         if time_window and isinstance(time_window, list) and len(time_window) == 2:
-            now = datetime.now()
+            tz_manager = TimezoneManager()
+            now = tz_manager.get_now()
             current_minutes = now.hour * 60 + now.minute
             if not (time_window[0] <= current_minutes <= time_window[1]):
                 return False
 
         # Check deadline
-        if self.deadline and datetime.now() > self.deadline:
+        tz_manager = TimezoneManager()
+        if self.deadline and tz_manager.get_now() > self.deadline:
             return False
 
         return True
 
     def mark_executed(self):
         """Mark goal as executed."""
-        self.last_executed_at = datetime.now()
+        tz_manager = TimezoneManager()
+        self.last_executed_at = tz_manager.get_now()
         self.execution_count += 1
 
     def get_summary(self) -> str:
@@ -246,7 +254,8 @@ class Goal:
         ]
 
         if self.deadline:
-            time_left = self.deadline - datetime.now()
+            tz_manager = TimezoneManager()
+            time_left = self.deadline - tz_manager.get_now()
             if time_left.total_seconds() > 0:
                 days = time_left.days
                 hours = time_left.seconds // 3600
@@ -287,7 +296,10 @@ class GoalManager:
         db_path = self.data_dir / db_name
         self.db = GoalDatabase(db_path=str(db_path), backup_on_init=True)
 
-        logger.info(f"GoalManager initialized with database: {db_path}")
+        # Initialize timezone manager
+        self.tz_manager = TimezoneManager()
+
+        logger.debug(f"GoalManager initialized with database: {db_path}")
 
     def create_goal(
         self,
@@ -450,7 +462,7 @@ class GoalManager:
             List of schedule Goal objects
         """
         if date_str is None:
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            date_str = self.tz_manager.get_now().strftime("%Y-%m-%d")
 
         goals = self.get_all_goals(chat_id=chat_id)
         schedule_goals = []
@@ -500,7 +512,7 @@ class GoalManager:
                     logger.debug(f"跳过重复日程: {goal.name} @ {time_window}")
 
             if len(unique_goals) < len(schedule_goals):
-                logger.info(f"去重：{len(schedule_goals)} -> {len(unique_goals)} 个日程")
+                logger.debug(f"去重：{len(schedule_goals)} -> {len(unique_goals)} 个日程")
 
             return unique_goals
 
@@ -610,7 +622,7 @@ class GoalManager:
         Returns:
             Number of goals cleaned up
         """
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = self.tz_manager.get_now() - timedelta(days=days)
 
         # Delete old completed goals
         completed_count = self.db.delete_goals_by_status(
@@ -644,7 +656,7 @@ class GoalManager:
         Returns:
             Number of schedule goals cleaned up
         """
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = self.tz_manager.get_now().strftime("%Y-%m-%d")
 
         # 获取所有ACTIVE状态的目标
         active_goals = self.get_all_goals(status=GoalStatus.ACTIVE)

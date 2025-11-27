@@ -55,7 +55,7 @@ class ConversationContextCache:
         self.user_contexts: Dict[str, Deque[ConversationTurn]] = {}
         self._last_cleanup = time.time()
 
-        logger.info(
+        logger.debug(
             f"对话上下文缓存初始化完成: max_turns={max_turns}, ttl={ttl}秒"
         )
 
@@ -252,7 +252,7 @@ class ConversationContextCache:
         """
         if user_id in self.user_contexts:
             del self.user_contexts[user_id]
-            logger.info(f"清除用户对话历史: user={user_id}")
+            logger.debug(f"清除用户对话历史: user={user_id}")
 
     def get_stats(self) -> Dict[str, int]:
         """获取缓存统计信息

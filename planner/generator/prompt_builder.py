@@ -15,10 +15,6 @@ from ...utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.prompt_builder")
 
-# 常量定义
-MOOD_SEED_MODULO = 100      # 心情种子取模数
-ENERGY_LEVEL_MODULO = 100   # 活力等级取模数
-
 
 class PromptBuilder:
     """提示词构建器 - 单一职责：构建LLM提示词
@@ -86,7 +82,8 @@ class PromptBuilder:
         # 从配置读取生成参数
         min_activities = self.config.get('min_activities', 8)
         max_activities = self.config.get('max_activities', 15)
-        min_desc_len = self.config.get('min_description_length', 15)
+        enable_detailed_description = self.config.get('enable_detailed_description', True)
+        min_desc_len = self.config.get('min_description_length', 20)
         max_desc_len = self.config.get('max_description_length', 50)
 
         # 读取自定义prompt配置
@@ -99,10 +96,6 @@ class PromptBuilder:
         weekday = weekday_names[today.weekday()]
         is_weekend = today.weekday() >= 5
 
-        # 状态生成（使用常量）
-        mood_seed = abs(hash(date_str)) % MOOD_SEED_MODULO
-        energy_level = abs(hash(date_str + "energy")) % ENERGY_LEVEL_MODULO
-
         # 昨日上下文
         yesterday_text = yesterday_context or "昨天普通的一天"
 
@@ -111,7 +104,6 @@ class PromptBuilder:
 
 今天是{date_str} {weekday}{"（周末）" if is_weekend else ""}
 昨天: {yesterday_text}
-状态: 心情{mood_seed}/100，活力{energy_level}/100
 """
 
         # 添加自定义prompt（如果配置了）
@@ -121,6 +113,12 @@ class PromptBuilder:
 {custom_prompt}
 """
 
+        # 根据配置决定描述要求
+        if enable_detailed_description:
+            desc_requirement = f"2. 每个description {min_desc_len}-{max_desc_len}字，用自然叙述风格（像日记）"
+        else:
+            desc_requirement = "2. description字段填空字符串\"\"即可（不需要描述）"
+
         prompt += f"""
 【任务】生成今天的详细日程JSON：
 🔴 核心要求：日程必须全天无缝衔接，不允许任何时间空档！
@@ -128,7 +126,7 @@ class PromptBuilder:
    - 计算公式：结束时间 = time_slot + duration_hours
 
 1. {min_activities}-{max_activities}个活动，完整覆盖全天（00:00-24:00，无缝衔接）
-2. 每个description {min_desc_len}-{max_desc_len}字，用自然叙述风格（像日记）
+{desc_requirement}
 3. 体现人设：{personality[:50]}...
 4. 兴趣相关：{interest if interest else "日常生活"}
 5. 表达风格：{reply_style[:30] if reply_style else "自然随意"}
@@ -142,22 +140,27 @@ class PromptBuilder:
 【活动类型】
 daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|custom(其他)
 
+⚠️ **重要：meal类型活动命名规范**
+- 活动名称必须直接使用：早餐、午餐、晚餐
+- 禁止使用：准备xx、零食时间、下午茶等变体
+- 时间要求：早餐06:00-09:00，午餐11:00-14:00，晚餐17:00-20:00
+
 【JSON格式示例】（完整展示全天无缝衔接）
 {
   "schedule_items": [
-    {"name":"睡觉","description":"蜷在被窝里睡得很香","goal_type":"daily_routine","priority":"high","time_slot":"00:00","duration_hours":7.5},
-    {"name":"起床洗漱","description":"迷迷糊糊爬起来刷牙洗脸","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","duration_hours":0.5},
-    {"name":"早餐","description":"简单吃了点东西","goal_type":"meal","priority":"high","time_slot":"08:00","duration_hours":0.5},
-    {"name":"上午学习","description":"认真看书学习新知识","goal_type":"study","priority":"high","time_slot":"08:30","duration_hours":3.5},
-    {"name":"午餐","description":"吃了喜欢的菜","goal_type":"meal","priority":"high","time_slot":"12:00","duration_hours":0.5},
-    {"name":"午休","description":"小憩一会儿恢复精力","goal_type":"daily_routine","priority":"medium","time_slot":"12:30","duration_hours":0.5},
-    {"name":"下午学习","description":"继续努力完成学习任务","goal_type":"study","priority":"high","time_slot":"13:00","duration_hours":2.0},
-    {"name":"兴趣活动","description":"做自己喜欢的事情","goal_type":"learn_topic","priority":"medium","time_slot":"15:00","duration_hours":2.0},
-    {"name":"运动","description":"出去跑步锻炼身体","goal_type":"exercise","priority":"medium","time_slot":"17:00","duration_hours":1.0},
-    {"name":"晚餐","description":"吃了丰盛的晚餐","goal_type":"meal","priority":"high","time_slot":"18:00","duration_hours":0.5},
-    {"name":"娱乐","description":"看视频放松一下","goal_type":"entertainment","priority":"low","time_slot":"18:30","duration_hours":3.0},
-    {"name":"夜聊","description":"和朋友聊天分享日常","goal_type":"social_maintenance","priority":"medium","time_slot":"21:30","duration_hours":1.0},
-    {"name":"睡前准备","description":"洗澡护肤准备睡觉","goal_type":"daily_routine","priority":"medium","time_slot":"22:30","duration_hours":1.5}
+    {"name":"睡觉","description":""" + ('"蜷在被窝里睡得很香"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"high","time_slot":"00:00","duration_hours":7.5},
+    {"name":"起床洗漱","description":""" + ('"迷迷糊糊爬起来刷牙洗脸"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","duration_hours":0.5},
+    {"name":"早餐","description":""" + ('"简单吃了点东西"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"08:00","duration_hours":0.5},
+    {"name":"上午学习","description":""" + ('"认真看书学习新知识"' if enable_detailed_description else '""') + ""","goal_type":"study","priority":"high","time_slot":"08:30","duration_hours":3.5},
+    {"name":"午餐","description":""" + ('"吃了喜欢的菜"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"12:00","duration_hours":0.5},
+    {"name":"午休","description":""" + ('"小憩一会儿恢复精力"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"12:30","duration_hours":0.5},
+    {"name":"下午学习","description":""" + ('"继续努力完成学习任务"' if enable_detailed_description else '""') + ""","goal_type":"study","priority":"high","time_slot":"13:00","duration_hours":2.0},
+    {"name":"兴趣活动","description":""" + ('"做自己喜欢的事情"' if enable_detailed_description else '""') + ""","goal_type":"learn_topic","priority":"medium","time_slot":"15:00","duration_hours":2.0},
+    {"name":"运动","description":""" + ('"出去跑步锻炼身体"' if enable_detailed_description else '""') + ""","goal_type":"exercise","priority":"medium","time_slot":"17:00","duration_hours":1.0},
+    {"name":"晚餐","description":""" + ('"吃了丰盛的晚餐"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"18:00","duration_hours":0.5},
+    {"name":"娱乐","description":""" + ('"看视频放松一下"' if enable_detailed_description else '""') + ""","goal_type":"entertainment","priority":"low","time_slot":"18:30","duration_hours":3.0},
+    {"name":"夜聊","description":""" + ('"和朋友聊天分享日常"' if enable_detailed_description else '""') + ""","goal_type":"social_maintenance","priority":"medium","time_slot":"21:30","duration_hours":1.0},
+    {"name":"睡前准备","description":""" + ('"洗澡护肤准备睡觉"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"22:30","duration_hours":1.5}
 """
 
         prompt += f"""（根据实际情况生成{min_activities}-{max_activities}个活动）
@@ -197,23 +200,22 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
   * 计算方式：结束时间 = time_slot + duration_hours
   * 示例：如果活动A在15:00结束，活动B必须从15:00开始！
 - ⚠️ 关键活动时间必须合理：早餐6-9点、午餐11-14点、晚餐17-20点、睡觉从22-2点开始
-- description简洁自然，{min_desc_len}-{max_desc_len}字
-- 体现{weekday}特色（{"周末睡懒觉" if is_weekend else "工作日早起"}）
-- 符合心情{mood_seed}和活力{energy_level}
+""" + ("- description填空字符串\"\"即可\n" if not enable_detailed_description else f"- description简洁，{min_desc_len}-{max_desc_len}字\n") + f"""- 体现{weekday}特色（{"周末睡懒觉" if is_weekend else "工作日早起"}）
 """
 
         # 添加Schema约束（精简版）
         if schema:
             import json
-            prompt += f"""
+            schema_desc = f"""
 【Schema要求】
 - {min_activities}-{max_activities}个活动（必须）
-- 必填：name(2-20字), description({min_desc_len}-{max_desc_len}字), time_slot, goal_type, priority
-- priority: high/medium/low
+- 必填：name(2-20字), time_slot, goal_type, priority
+""" + ("- description填空字符串\"\"即可\n" if not enable_detailed_description else f"- description: {min_desc_len}-{max_desc_len}字\n") + f"""- priority: high/medium/low
 - duration_hours: 0.25-12（活动持续时长，小时）
 
 Schema: {json.dumps(schema.get('properties', {}).get('schedule_items', {}), ensure_ascii=False)}
 """
+            prompt += schema_desc
 
         return prompt
 

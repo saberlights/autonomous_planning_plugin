@@ -140,11 +140,17 @@ class Schedule:
         items: List[ScheduleItem],
         created_at: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        timezone: str = "Asia/Shanghai",
     ):
         self.schedule_type = schedule_type
         self.name = name
         self.items = items
-        self.created_at = created_at or datetime.now()
+        # 使用时区感知时间
+        if created_at is None:
+            from ..utils.timezone_manager import TimezoneManager
+            tz_manager = TimezoneManager(timezone)
+            created_at = tz_manager.get_now()
+        self.created_at = created_at
         self.metadata = metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:

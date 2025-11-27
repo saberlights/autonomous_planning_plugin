@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 from src.common.logger import get_logger
+from .timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.schedule_image_generator")
 
@@ -208,7 +209,8 @@ class ScheduleImageGenerator:
     @staticmethod
     def _get_activity_status(time_str: str) -> str:
         """获取活动状态: current/completed/upcoming"""
-        now = datetime.now()
+        tz_manager = TimezoneManager()
+        now = tz_manager.get_now()
         current_minutes = now.hour * 60 + now.minute
 
         start_minutes, end_minutes = ScheduleImageGenerator._parse_time_str(time_str)
@@ -352,7 +354,9 @@ class ScheduleImageGenerator:
 
         # 找到当前或下一个日程的索引
         target_index = -1
-        current_time_minutes = datetime.now().hour * 60 + datetime.now().minute
+        tz_manager = TimezoneManager()
+        now = tz_manager.get_now()
+        current_time_minutes = now.hour * 60 + now.minute
 
         # 优先查找正在进行的日程
         for idx, item in enumerate(schedule_items):
